@@ -29,7 +29,7 @@
 *{box-sizing:border-box}
 /* Flex and grid items default to min-width:auto, which lets a long title push
    a card wider than the phone. Every container below opts out. */
-main>*,.card,.row>*,.cardrow>*,.days>*,.meta>*,.line>*{min-width:0}
+main>*,.card,.row>*,.cardrow>*,.days>*,.meta>*,.line>*,.tags>*{min-width:0}
 html{overflow-x:clip;-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);
   font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
@@ -69,7 +69,11 @@ button:disabled{opacity:.5;cursor:default}
 .chip{border-radius:999px;padding:.35rem .75rem;font-size:.85rem}
 .chip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
 .pill{display:inline-block;padding:.08rem .5rem;border-radius:999px;font-size:.72rem;font-weight:600;
-  background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted);white-space:nowrap}
+  background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted);white-space:nowrap;
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+/* A tag listing things (shared ingredients, missing ones) wraps onto more lines
+   instead of pushing the card — and so the whole page — wider than the phone. */
+.pill.list{white-space:normal;overflow-wrap:anywhere;border-radius:10px;line-height:1.35;text-align:left}
 .pill.good{background:color-mix(in srgb,var(--good) 15%,transparent);color:var(--good)}
 .pill.warn{background:color-mix(in srgb,var(--warn) 15%,transparent);color:var(--warn)}
 .pill.bad{background:color-mix(in srgb,var(--bad) 13%,transparent);color:var(--bad)}
@@ -288,6 +292,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const money = n => '$' + Number(n || 0).toFixed(2);
 const g = n => Math.round(Number(n || 0));
 const short = name => String(name).split(',')[0].replace(/\s*\(.*\)$/, '');
+const few = (names, n = 3) => names.length <= n ? names.join(' · ')
+  : `${names.slice(0, n).join(' · ')} +${names.length - n} more`;
 const DOWS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const STATUS_LABEL = {home:'Free', busy:'Busy', out:'Out', away:'Away'};
 const STATUS_CYCLE = [null, 'home', 'busy', 'out', 'away'];
@@ -454,8 +460,8 @@ function recipeTags(r, extra = [], {cuisine = true} = {}){
   if(ORIGIN[r.origin]) tags.push(`<span class="pill accent">${ORIGIN[r.origin]}</span>`);
   if(t.protein === false) tags.push(`<span class="pill warn">${g(t.protein_gap)} g short on protein</span>`);
   if(t.fiber === false) tags.push(`<span class="pill warn">low fiber</span>`);
-  if(r.unavailable && r.unavailable.length) tags.push(`<span class="pill bad">not at your stores: ${esc(r.unavailable.join(', '))}</span>`);
-  if(r.problems && r.problems.length) tags.push(`<span class="pill bad">${esc(r.problems[0])}</span>`);
+  if(r.unavailable && r.unavailable.length) tags.push(`<span class="pill bad list">not at your stores: ${esc(few(r.unavailable.map(short)).toLowerCase())}</span>`);
+  if(r.problems && r.problems.length) tags.push(`<span class="pill bad list">${esc(r.problems[0])}</span>`);
   return `<div class="tags">${tags.join('')}</div>`;
 }
 
@@ -503,7 +509,7 @@ function renderCands(p){
       ${recipeMeta(r)}
       ${recipeTags(r, [
         p.selected.length ? `<span class="pill ${r.adds_to_bill < r.total_cost * .8 ? 'good' : ''}">+${money(r.adds_to_bill)} to your list</span>` : '',
-        r.shares.length ? `<span class="pill good">shares ${esc(r.shares.map(short).join(' · ').toLowerCase())}</span>` : ''])}
+        r.shares.length ? `<span class="pill good list">shares ${esc(few(r.shares.map(short)).toLowerCase())}</span>` : ''])}
       <div class="cardrow"><button class="primary" data-action="select" data-id="${r.id}">Add to week</button>
         <button data-action="view" data-id="${r.id}">Recipe</button></div>
     </div>`).join('') : `<div class="empty">No suggestions right now.</div>`;
