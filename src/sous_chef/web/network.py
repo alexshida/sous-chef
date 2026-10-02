@@ -54,8 +54,8 @@ def tailscale_ip() -> str:
 
     Deliberately refuses to infer this from network interfaces. 100.64.0.0/10 is
     the shared CGNAT range — carriers, corporate VPNs and other tunnels all use
-    it — so an address in that range is no evidence Tailscale is involved. This
-    machine has a utun interface on 100.64.x.x belonging to an unrelated VPN;
+    it — so an address in that range is no evidence Tailscale is involved. A
+    Mac running some other VPN can have a utun interface on 100.64.x.x, and
     binding to it while reporting "your tailnet only" would hand you a
     private-looking URL served on somebody else's network.
 
