@@ -195,3 +195,27 @@ def test_strangers_are_refused():
 def test_tailnet_clients_are_served(fresh_db):
     with TestClient(app, client=("100.101.102.103", 50000)) as c:
         assert c.get("/api/prefs").status_code == 200
+
+
+def test_reconnecting_with_nothing_running_says_idle(client):
+    plan = client.post("/api/plan", json={"suggest": False}).json()
+    r = client.get(f"/api/chef/stream?plan_id={plan['id']}")
+    events = [json.loads(l[6:]) for l in r.text.splitlines() if l.startswith("data: ")]
+    assert events == [{"type": "idle"}]
+
+
+def test_a_second_chef_request_attaches_and_replays(client, monkeypatch):
+    """Stream the job a running request would have joined: `attached`, then
+    the run from its start."""
+    job = chef.Job(key="plan-1", task="suggest")
+    for e in ({"type": "status", "text": "Reading your week"},
+              {"type": "recipe", "id": 5, "title": "Dal"}, {"type": "done", "saved": [5]}):
+        job.add(e)
+    job.finish()
+    monkeypatch.setattr(chef, "start_or_attach", lambda *a, **k: (job, True))
+    r = client.post("/api/chef", json={"task": "suggest", "plan_id": 1})
+    events = [json.loads(l[6:]) for l in r.text.splitlines() if l.startswith("data: ")]
+    assert [e["type"] for e in events] == ["attached", "status", "recipe", "done"]
+    monkeypatch.setattr(chef, "current_job", lambda *a, **k: job)
+    r = client.get("/api/chef/stream?plan_id=1&recent=true")
+    assert "Dal" in r.text

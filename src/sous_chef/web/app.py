@@ -199,22 +199,45 @@ class ChefRequest(BaseModel):
     text: str = ""
 
 
-@app.post("/api/chef")
-def api_chef(req: ChefRequest):
-    """Stream a chef run as server-sent events."""
+def _sse(events) -> StreamingResponse:
     def stream():
-        try:
-            for event in chef.run(req.task, plan_id=req.plan_id, count=req.count, text=req.text):
-                yield f"data: {json.dumps(event)}\n\n"
-        except chef.ChefError as e:
-            yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'saved': []})}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'text': f'{type(e).__name__}: {e}'})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'saved': []})}\n\n"
-
+        for event in events:
+            # A comment line keeps an idle connection from being dropped.
+            yield ": keepalive\n\n" if event is None else f"data: {json.dumps(event)}\n\n"
     return StreamingResponse(stream(), media_type="text/event-stream", headers={
         "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _follow(job: chef.Job, attached: bool):
+    if attached:
+        yield {"type": "attached", "task": job.task}
+    yield from job.follow()
+
+
+@app.post("/api/chef")
+def api_chef(req: ChefRequest):
+    """Start a chef run and stream it — or, if one is already running for this
+    plan, stream that one instead of starting a second."""
+    try:
+        job, attached = chef.start_or_attach(req.task, plan_id=req.plan_id, count=req.count,
+                                             text=req.text)
+    except chef.ChefError as e:
+        return _sse([{"type": "error", "text": str(e)}, {"type": "done", "saved": []}])
+    return _sse(_follow(job, attached))
+
+
+@app.get("/api/chef/stream")
+def api_chef_stream(plan_id: int | None = None, recent: bool = False):
+    """Reconnect to the plan's chef run after a dropped stream.
+
+    Replays it from the start. With `recent`, a run that finished while the
+    page was away is replayed too, so it can show what was saved; otherwise
+    an idle plan answers with a single `idle` event.
+    """
+    job = chef.current_job(plan_id, recent=recent)
+    if not job:
+        return _sse([{"type": "idle"}])
+    return _sse(_follow(job, attached=True))
 
 
 # ── recipes ──────────────────────────────────────────────────

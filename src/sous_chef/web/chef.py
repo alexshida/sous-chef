@@ -14,6 +14,13 @@ Three jobs, each one CLI run:
 
 Progress is streamed to the browser as each tool call happens, and every
 recipe appears the moment propose_recipe saves it.
+
+One run per plan. A run belongs to the server, not to the request that
+started it: it is driven by a background thread into a `Job` that any number
+of requests can follow, replaying from the start. A phone that locks mid-run
+drops its stream, but the run carries on, and the page reconnects to it rather
+than starting a second one — two runs on one week each read the same
+"already offered" list and saved near-identical recipes.
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -359,3 +368,109 @@ def _finish(proc: subprocess.Popen, cfg_path: str) -> None:
             os.unlink(cfg_path)
         except OSError:
             pass
+
+
+# ── one run per plan ─────────────────────────────────────────
+
+# How long a finished run stays available to a page reconnecting after a
+# dropped stream, so it can still show what was saved while it was away.
+RECENT_SECONDS = 600
+_KEEPALIVE = 15.0
+
+
+@dataclass
+class Job:
+    """One chef run, shared by every request following it."""
+
+    key: str
+    task: str
+    events: list[dict] = field(default_factory=list)
+    done: bool = False
+    finished_at: float | None = None
+    cond: threading.Condition = field(default_factory=threading.Condition)
+
+    def add(self, event: dict) -> None:
+        with self.cond:
+            self.events.append(event)
+            self.cond.notify_all()
+
+    def finish(self) -> None:
+        with self.cond:
+            self.done = True
+            self.finished_at = time.time()
+            self.cond.notify_all()
+
+    def follow(self, keepalive: float = _KEEPALIVE) -> Iterator[dict | None]:
+        """Every event from the start, then new ones as they come, until done.
+
+        Yields None when nothing has happened for `keepalive` seconds, so the
+        caller can send something that keeps an idle phone connection open.
+        """
+        i = 0
+        while True:
+            with self.cond:
+                if i >= len(self.events) and not self.done:
+                    self.cond.wait(timeout=keepalive)
+                new, done = self.events[i:], self.done
+            if not new and not done:
+                yield None
+            for event in new:
+                yield event
+            i += len(new)
+            if done and i >= len(self.events):
+                return
+
+
+_jobs: dict[str, Job] = {}
+_jobs_lock = threading.Lock()
+
+
+def _key(plan_id: int | None) -> str:
+    return f"plan-{plan_id}" if plan_id else "library"
+
+
+def start_or_attach(task: str, *, plan_id: int | None = None, count: int = 3,
+                    text: str = "", model: str | None = None) -> tuple[Job, bool]:
+    """The plan's running job if there is one (attached=True), else a new one.
+
+    A bad request (no text to craft from, say) raises ChefError here, before
+    anything is started.
+    """
+    key = _key(plan_id)
+    with _jobs_lock:
+        job = _jobs.get(key)
+        if job and not job.done:
+            return job, True
+        build_prompt(task, plan_id=plan_id, count=count, text=text)
+        job = Job(key=key, task=task)
+        _jobs[key] = job
+    threading.Thread(target=_drive, args=(job, task, plan_id, count, text, model),
+                     daemon=True, name=f"chef-{key}").start()
+    return job, False
+
+
+def _drive(job: Job, task: str, plan_id: int | None, count: int, text: str,
+           model: str | None) -> None:
+    try:
+        for event in run(task, plan_id=plan_id, count=count, text=text, model=model):
+            job.add(event)
+    except ChefError as e:
+        job.add({"type": "error", "text": str(e)})
+        job.add({"type": "done", "saved": []})
+    except Exception as e:  # surfaced to whoever is following, not swallowed
+        job.add({"type": "error", "text": f"{type(e).__name__}: {e}"})
+        job.add({"type": "done", "saved": []})
+    finally:
+        job.finish()
+
+
+def current_job(plan_id: int | None, *, recent: bool = False) -> Job | None:
+    """The plan's running job, or with `recent` one that finished lately."""
+    job = _jobs.get(_key(plan_id))
+    if not job:
+        return None
+    if not job.done:
+        return job
+    if recent and job.finished_at and time.time() - job.finished_at < RECENT_SECONDS:
+        return job
+    return None

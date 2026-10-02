@@ -18,12 +18,15 @@ FAKE_CLI = r'''#!PYTHON
 import json, os, sys
 def emit(o): print(json.dumps(o), flush=True)
 mode = os.environ.get("FAKE_MODE", "ok")
+if os.environ.get("FAKE_LOG"):
+    open(os.environ["FAKE_LOG"], "a").write("launch\n")
 if mode == "silent":
     print("not logged in", file=sys.stderr); sys.exit(1)
 emit({"type": "system", "subtype": "init", "session_id": "s1"})
 emit({"type": "assistant", "message": {"content": [
     {"type": "tool_use", "id": "t1", "name": "mcp__sous-chef__plan_context", "input": {"plan_id": 1}}]}})
 emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "{}"}]}})
+import time; time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
 emit({"type": "assistant", "message": {"content": [
     {"type": "tool_use", "id": "t2", "name": "mcp__sous-chef__search_catalog", "input": {"query": "salmon"}}]}})
 emit({"type": "assistant", "message": {"content": [
@@ -86,3 +89,73 @@ def test_the_mcp_config_is_cleaned_up(fake_cli, tmp_path, monkeypatch):
 def test_unparseable_lines_are_ignored():
     state = chef._Run()
     assert chef.ingest("not json", state) == [] and chef.ingest("", state) == []
+
+
+# ── one run per plan ─────────────────────────────────────────
+
+@pytest.fixture
+def slow_cli(fake_cli, tmp_path, monkeypatch):
+    log = tmp_path / "launches"
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    monkeypatch.setenv("FAKE_DELAY", "1.0")
+    monkeypatch.setattr(chef, "_jobs", {})
+    return log
+
+
+def _drain(job):
+    return [e for e in job.follow(keepalive=0.2) if e is not None]
+
+
+def test_a_second_request_joins_the_running_job(slow_cli):
+    """The bug: a phone that dropped its stream and tapped again started a
+    second CLI run on the same week, and both saved recipes."""
+    first, attached1 = chef.start_or_attach("suggest", plan_id=7)
+    second, attached2 = chef.start_or_attach("suggest", plan_id=7)
+    assert second is first and not attached1 and attached2
+    events = _drain(first)
+    assert events[-1]["type"] == "done"
+    assert slow_cli.read_text().count("launch") == 1
+
+
+def test_following_late_replays_the_whole_run(slow_cli):
+    job, _ = chef.start_or_attach("suggest", plan_id=7)
+    early = _drain(job)
+    late = _drain(job)            # a reconnect after it finished
+    assert late == early and any(e["type"] == "recipe" for e in late)
+
+
+def test_different_plans_run_independently(slow_cli):
+    a, _ = chef.start_or_attach("suggest", plan_id=1)
+    b, _ = chef.start_or_attach("suggest", plan_id=2)
+    assert a is not b
+    _drain(a), _drain(b)
+    assert slow_cli.read_text().count("launch") == 2
+
+
+def test_a_finished_job_starts_fresh_next_time(slow_cli):
+    first, _ = chef.start_or_attach("suggest", plan_id=7)
+    _drain(first)
+    second, attached = chef.start_or_attach("suggest", plan_id=7)
+    assert second is not first and not attached
+    _drain(second)
+
+
+def test_reconnecting_finds_running_and_recent_jobs(slow_cli):
+    assert chef.current_job(7) is None
+    job, _ = chef.start_or_attach("suggest", plan_id=7)
+    assert chef.current_job(7) is job
+    _drain(job)
+    assert chef.current_job(7) is None                 # idle unless asking for recent
+    assert chef.current_job(7, recent=True) is job
+
+
+def test_an_idle_follower_gets_keepalives(slow_cli):
+    job, _ = chef.start_or_attach("suggest", plan_id=7)
+    seen = list(job.follow(keepalive=0.2))
+    assert None in seen and seen[-1]["type"] == "done"
+
+
+def test_a_bad_request_is_refused_before_anything_starts(slow_cli):
+    with pytest.raises(chef.ChefError):
+        chef.start_or_attach("craft", plan_id=7, text="")
+    assert chef.current_job(7) is None and not slow_cli.exists()
