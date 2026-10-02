@@ -1,0 +1,360 @@
+"""FastAPI app: the planner's data and the recipe chef, over the shared tool layer.
+
+The REST endpoints are deliberately thin — every one is a direct call into
+`sous_chef.tools`, the same functions the MCP server exposes to Claude.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from sous_chef import tools
+from sous_chef.storage.db import init_db
+from sous_chef.web import chef
+
+STATIC = Path(__file__).parent / "static"
+
+app = FastAPI(title="sous-chef", docs_url="/api/docs")
+
+
+@app.middleware("http")
+async def _restrict_to_private_networks(request, call_next):
+    """Serve loopback and the tailnet only — see web/network.py."""
+    from sous_chef.web.network import is_allowed_client
+    client = request.client.host if request.client else None
+    if not is_allowed_client(client):
+        return JSONResponse({"detail": "sous-chef serves loopback and your tailnet only."},
+                            status_code=403)
+    return await call_next(request)
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    init_db()
+
+
+def _call(fn, *args, **kwargs) -> Any:
+    try:
+        return fn(*args, **kwargs)
+    except tools.ToolError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:  # surfaced rather than swallowed
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# ── preferences ──────────────────────────────────────────────
+
+@app.get("/api/prefs")
+def api_prefs():
+    return _call(tools.get_preferences)
+
+
+@app.put("/api/prefs")
+def api_update_prefs(changes: dict):
+    changes = {k: v for k, v in changes.items() if k not in ("store_names", "cuisine_names")}
+    return _call(tools.update_preferences, changes)
+
+
+# ── plans ────────────────────────────────────────────────────
+
+class NewPlan(BaseModel):
+    week_start: str | None = None
+    n_recipes: int | None = None
+    stores: list[str] | None = None
+    suggest: bool = True
+
+
+@app.get("/api/plan")
+def api_current_plan():
+    """The latest plan, or a 404 the page answers by starting one."""
+    from sous_chef.storage import db
+    latest = db.latest_plan()
+    if not latest:
+        raise HTTPException(status_code=404, detail="No plan yet.")
+    return _call(tools.get_plan, latest["id"])
+
+
+@app.post("/api/plan")
+def api_new_plan(req: NewPlan):
+    plan = _call(tools.new_plan, req.week_start, req.n_recipes, req.stores)
+    if req.suggest:
+        plan = _call(tools.suggest_from_library, plan["id"], max(3, plan["n_recipes"] + 1))
+    return plan
+
+
+@app.get("/api/plan/{plan_id}")
+def api_plan(plan_id: int):
+    return _call(tools.get_plan, plan_id)
+
+
+class PlanUpdate(BaseModel):
+    week_start: str | None = None
+    n_recipes: int | None = None
+    stores: list[str] | None = None
+
+
+@app.patch("/api/plan/{plan_id}")
+def api_update_plan(plan_id: int, req: PlanUpdate):
+    return _call(tools.update_plan, plan_id, req.week_start, req.n_recipes, req.stores)
+
+
+class Suggest(BaseModel):
+    count: int = 4
+    replace: bool = True
+
+
+@app.post("/api/plan/{plan_id}/library")
+def api_library_suggestions(plan_id: int, req: Suggest):
+    return _call(tools.suggest_from_library, plan_id, req.count, req.replace)
+
+
+class RecipeRef(BaseModel):
+    recipe_id: int
+    servings: int | None = None
+
+
+@app.post("/api/plan/{plan_id}/select")
+def api_select(plan_id: int, req: RecipeRef):
+    return _call(tools.select_recipe, plan_id, req.recipe_id, req.servings)
+
+
+@app.post("/api/plan/{plan_id}/deselect")
+def api_deselect(plan_id: int, req: RecipeRef):
+    return _call(tools.deselect_recipe, plan_id, req.recipe_id)
+
+
+@app.post("/api/plan/{plan_id}/dismiss")
+def api_dismiss(plan_id: int, req: RecipeRef):
+    _call(tools.dismiss_candidate, plan_id, req.recipe_id)
+    return _call(tools.get_plan, plan_id)
+
+
+@app.post("/api/plan/{plan_id}/servings")
+def api_servings(plan_id: int, req: RecipeRef):
+    if req.servings is None:
+        raise HTTPException(status_code=422, detail="servings is required")
+    return _call(tools.set_servings, plan_id, req.recipe_id, req.servings)
+
+
+class CookDate(BaseModel):
+    recipe_id: int
+    cook_date: str | None = None
+
+
+@app.post("/api/plan/{plan_id}/cook-date")
+def api_cook_date(plan_id: int, req: CookDate):
+    return _call(tools.set_cook_date, plan_id, req.recipe_id, req.cook_date)
+
+
+class DayStatus(BaseModel):
+    date: str
+    status: str | None = None
+
+
+@app.post("/api/plan/{plan_id}/day")
+def api_day(plan_id: int, req: DayStatus):
+    _call(tools.set_day_status, plan_id, req.date, req.status)
+    return _call(tools.get_plan, plan_id)
+
+
+@app.get("/api/plan/{plan_id}/grocery")
+def api_grocery(plan_id: int):
+    return _call(tools.get_grocery_list, plan_id)
+
+
+class Check(BaseModel):
+    ingredient_id: str
+    checked: bool = True
+
+
+@app.post("/api/plan/{plan_id}/grocery/check")
+def api_grocery_check(plan_id: int, req: Check):
+    return _call(tools.check_grocery_item, plan_id, req.ingredient_id, req.checked)
+
+
+@app.get("/api/plan/{plan_id}/calendar.ics")
+def api_calendar(plan_id: int):
+    """Cook blocks as an .ics file. Opened on an iPhone it offers "Add All"."""
+    ics = _call(tools.calendar_ics, plan_id)
+    return Response(content=ics, media_type="text/calendar; charset=utf-8", headers={
+        "Content-Disposition": f'inline; filename="meal-plan-{plan_id}.ics"'})
+
+
+# ── the chef ─────────────────────────────────────────────────
+
+class ChefRequest(BaseModel):
+    task: str                      # suggest | craft | import
+    plan_id: int | None = None
+    count: int = 3
+    text: str = ""
+
+
+@app.post("/api/chef")
+def api_chef(req: ChefRequest):
+    """Stream a chef run as server-sent events."""
+    def stream():
+        try:
+            for event in chef.run(req.task, plan_id=req.plan_id, count=req.count, text=req.text):
+                yield f"data: {json.dumps(event)}\n\n"
+        except chef.ChefError as e:
+            yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'saved': []})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'text': f'{type(e).__name__}: {e}'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'saved': []})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── recipes ──────────────────────────────────────────────────
+
+@app.get("/api/recipes")
+def api_recipes(q: str = "", cuisine: str | None = None):
+    return _call(tools.list_recipes, q, cuisine)
+
+
+@app.get("/api/recipe/{recipe_id}")
+def api_recipe(recipe_id: int, servings: int | None = None, plan_id: int | None = None):
+    return _call(tools.get_recipe, recipe_id, servings, plan_id)
+
+
+class Keep(BaseModel):
+    keep: bool = True
+
+
+@app.post("/api/recipe/{recipe_id}/library")
+def api_keep(recipe_id: int, req: Keep):
+    return _call(tools.save_to_library, recipe_id, req.keep)
+
+
+@app.delete("/api/recipe/{recipe_id}")
+def api_delete_recipe(recipe_id: int):
+    return _call(tools.delete_recipe, recipe_id)
+
+
+# ── catalog, prices, pantry ──────────────────────────────────
+
+@app.get("/api/catalog")
+def api_catalog(q: str = "", aisle: str | None = None, limit: int = 0):
+    return _call(tools.search_catalog, q, aisle, limit)
+
+
+class Price(BaseModel):
+    ingredient_id: str
+    store: str
+    price: float
+    pkg_qty: float | None = None
+    pkg_unit: str | None = None
+    product: str | None = None
+
+
+@app.put("/api/price")
+def api_price(req: Price):
+    return _call(tools.set_price, req.ingredient_id, req.store, req.price, req.pkg_qty,
+                 req.pkg_unit, req.product)
+
+
+class Carried(BaseModel):
+    ingredient_id: str
+    store: str
+    carried: bool
+
+
+@app.post("/api/carried")
+def api_carried(req: Carried):
+    return _call(tools.set_carried, req.ingredient_id, req.store, req.carried)
+
+
+class PantryItem(BaseModel):
+    ingredient_id: str
+    have: bool = True
+
+
+@app.get("/api/pantry")
+def api_pantry():
+    return _call(tools.get_pantry)
+
+
+@app.post("/api/pantry")
+def api_set_pantry(req: PantryItem):
+    return _call(tools.set_pantry, req.ingredient_id, req.have)
+
+
+class PantryBatch(BaseModel):
+    ingredient_ids: list[str]
+
+
+@app.post("/api/pantry/stock")
+def api_stock_pantry(req: PantryBatch):
+    """After a shop: everything mostly left over goes into the pantry at once."""
+    return [_call(tools.set_pantry, iid, True) for iid in req.ingredient_ids]
+
+
+# ── static UI ────────────────────────────────────────────────
+
+@app.get("/")
+def index():
+    return FileResponse(STATIC / "index.html")
+
+
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+def serve(host: str = "127.0.0.1", port: int = 8766, reload: bool = False) -> None:
+    import uvicorn
+    uvicorn.run("sous_chef.web.app:app" if reload else app,
+                host=host, port=port, reload=reload, log_level="info")
+
+
+def serve_sockets(sockets: list, port: int = 8766, await_tailnet: bool = False,
+                  log_level: str = "info") -> None:
+    """Serve on already-open sockets — loopback plus the tailnet when present.
+
+    With `await_tailnet`, a background thread keeps looking for the tailnet and
+    starts serving on it the moment it appears, since at login the app usually
+    wins the race against Tailscale.
+    """
+    import uvicorn
+
+    if await_tailnet:
+        _watch_for_tailnet(port, log_level)
+    uvicorn.Server(uvicorn.Config(app, log_level=log_level)).run(sockets=sockets)
+
+
+def _watch_for_tailnet(port: int, log_level: str, interval: float = 20.0) -> None:
+    import logging
+    import threading
+    import time
+
+    from sous_chef.web.network import NoTailnet, _listen, tailscale_ip
+
+    log = logging.getLogger("sous_chef.tailnet")
+
+    def serve_on(sock) -> None:
+        import uvicorn
+        uvicorn.Server(uvicorn.Config(app, log_level=log_level)).run(sockets=[sock])
+
+    def watch() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                addr = tailscale_ip()
+            except NoTailnet:
+                continue
+            try:
+                sock = _listen(addr, port)
+            except OSError:
+                continue
+            log.info("Tailscale is up — now also serving on http://%s:%d", addr, port)
+            threading.Thread(target=serve_on, args=(sock,), daemon=True).start()
+            return
+
+    threading.Thread(target=watch, daemon=True).start()
