@@ -145,19 +145,54 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48]
 
 
+_QUALIFIERS = {"fresh", "dried", "dry", "organic", "canned", "raw", "frozen", "and", "or",
+               "of", "the", "a", "with", "drained", "cooked", "whole", "large", "small"}
+
+
+def _words(name: str) -> set[str]:
+    return set(re.sub(r"[^a-z ]", " ", name.lower()).split()) - _QUALIFIERS
+
+
+def _near_duplicates(name: str) -> list[str]:
+    """Catalog ingredients that look like the same thing as `name`.
+
+    "Fish sauce, Thai" against "Fish sauce": one name's words contain the
+    other's. A model asked to use only what the stores carry is tempted to
+    add a twin of an unavailable item with a made-up price; this catches it.
+    """
+    mine = _words(name)
+    out = []
+    for iid, ing in _catalog().items():
+        theirs = _words(ing["name"])
+        similar = difflib.SequenceMatcher(None, name.lower(), ing["name"].lower()).ratio() > 0.85
+        if theirs and mine and (theirs <= mine or mine <= theirs or similar):
+            out.append(f"{iid} ({ing['name']})")
+    return out
+
+
 def add_ingredient(name: str, aisle: str, kcal: float, protein: float, carbs: float,
                    fat: float, fiber: float, offers: list[dict], perishable: bool = False,
-                   g_per_cup: float | None = None, unit_g: dict | None = None) -> dict:
+                   g_per_cup: float | None = None, unit_g: dict | None = None,
+                   not_duplicate: bool = False) -> dict:
     """Add an ingredient the catalog lacks, with estimated nutrition and prices.
 
     offers: [{store, product, pkg_qty, pkg_unit, price}]. Prices added this way
-    are marked as estimates until you correct them.
+    are marked as estimates until you correct them. Something that looks like
+    an existing ingredient is refused with the match named; `not_duplicate`
+    says it really is different (brown sugar beside sugar).
     """
     iid = _slug(name)
     if not iid:
         raise ToolError("name is required")
     if db.get_ingredient(iid):
         raise ToolError(f"'{iid}' already exists — use it rather than adding a duplicate.")
+    if not not_duplicate:
+        twins = _near_duplicates(name)
+        if twins:
+            raise ToolError(
+                f"The catalog already has {', '.join(twins[:4])}. Use that, even if the user's "
+                "stores don't sell it — the app shows where to buy it. Only if this is "
+                "genuinely a different ingredient, call again with not_duplicate=true.")
     if aisle not in grocery.AISLE_ORDER:
         raise ToolError(f"aisle must be one of: {', '.join(grocery.AISLE_ORDER)}")
     nums = {"kcal": kcal, "protein": protein, "carbs": carbs, "fat": fat, "fiber": fiber}
@@ -379,7 +414,9 @@ def propose_recipe(recipe: dict, plan_id: int | None = None, origin: str = "clau
     rid = db.insert_recipe(clean, source=origin, in_library=origin != "claude")
     if plan_id is not None:
         db.add_candidate(plan_id, rid, origin)
-    out = get_recipe(rid, servings=_prefs().default_servings, plan_id=plan_id)
+    # Reported at the servings it was written for; cards scale it to the
+    # user's default, and that difference is not something to fix.
+    out = get_recipe(rid, plan_id=plan_id)
     return {k: out[k] for k in ("id", "title", "servings", "total_cost", "cost_per_serving",
                                 "per_serving", "targets", "unavailable", "stores")}
 

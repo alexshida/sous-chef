@@ -47,7 +47,10 @@ Writing a recipe:
    nutrition per 100 g and `available`. Search broadly ("chicken", "beans",
    "greens") rather than one item at a time.
 2. add_ingredient only for something essential the catalog genuinely lacks,
-   with honest nutrition and a realistic price for the plan's store.
+   with honest nutrition, and offers only at stores you are confident carry
+   it. Never add a twin of an existing ingredient to make it look available:
+   when converting the user's own recipe, use the existing ingredient even if
+   their stores don't sell it — the app tells them where to buy it.
 3. Quantities are for the recipe's own servings (write for 4 unless told
    otherwise), in a unit listed for that ingredient, measured the way an
    American home cook measures: lb or oz for meat and fish, cans, cups,

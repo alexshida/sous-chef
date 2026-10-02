@@ -211,3 +211,24 @@ def test_no_plan_is_a_readable_error(fresh_db):
     with pytest.raises(tools.ToolError) as e:
         tools.get_plan()
     assert "new_plan" in str(e.value)
+
+
+def test_a_twin_of_an_existing_ingredient_is_refused(fresh_db):
+    offers = [{"store": "tj", "pkg_qty": 8, "pkg_unit": "fl oz", "price": 3.99}]
+    with pytest.raises(tools.ToolError) as e:
+        tools.add_ingredient("Fish sauce, Thai", "oils & condiments", 35, 5, 4, 0, 0, offers,
+                             g_per_cup=288)
+    assert "fish-sauce (Fish sauce)" in str(e.value) and "not_duplicate" in str(e.value)
+    # brown sugar really is different from sugar, and says so
+    with pytest.raises(tools.ToolError):
+        tools.add_ingredient("Brown sugar", "baking", 380, 0, 98, 0, 0,
+                             [{"store": "tj", "pkg_qty": 1, "pkg_unit": "lb", "price": 2.99}])
+    added = tools.add_ingredient("Brown sugar", "baking", 380, 0, 98, 0, 0,
+                                 [{"store": "tj", "pkg_qty": 1, "pkg_unit": "lb", "price": 2.99}],
+                                 not_duplicate=True)
+    assert added["id"] == "brown-sugar"
+
+
+def test_a_proposed_recipe_reports_the_servings_it_was_written_for(plan):
+    out = tools.propose_recipe({**GOOD, "servings": 3}, plan["id"])
+    assert out["servings"] == 3

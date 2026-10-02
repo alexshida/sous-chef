@@ -117,18 +117,23 @@ def get_ingredient(ingredient_id: str) -> dict:
 @mcp.tool()
 def add_ingredient(name: str, aisle: str, kcal: float, protein: float, carbs: float,
                    fat: float, fiber: float, offers: list[dict], perishable: bool = False,
-                   g_per_cup: float | None = None, unit_g: dict[str, float] | None = None) -> dict:
-    """Add an ingredient the catalog genuinely lacks. Search first.
+                   g_per_cup: float | None = None, unit_g: dict[str, float] | None = None,
+                   not_duplicate: bool = False) -> dict:
+    """Add an ingredient the catalog genuinely lacks. Search first, and never add
+    a twin of an existing ingredient just because the user's stores lack it.
 
-    Nutrition is per 100 g. offers: [{store, product, pkg_qty, pkg_unit, price}]
-    with store one of tj, qfc, pcc and a realistic price estimate. g_per_cup lets
-    it be measured by volume; unit_g gives grams per counted unit, e.g.
-    {"each": 120} or {"bunch": 60}. aisle: produce, meat & seafood, dairy & eggs,
-    refrigerated, frozen, bakery, grains & pasta, canned & jarred,
-    oils & condiments, baking, spices, nuts & seeds.
+    Nutrition is per 100 g. offers: [{store, product, pkg_qty, pkg_unit, price}],
+    store one of tj (Trader Joe's), qfc, pcc — list only stores you are
+    confident sell it, with a realistic price. It is fine if none of them is
+    the user's store. g_per_cup lets it be measured by volume; unit_g gives
+    grams per counted unit, e.g. {"each": 120} or {"bunch": 60}. aisle:
+    produce, meat & seafood, dairy & eggs, refrigerated, frozen, bakery,
+    grains & pasta, canned & jarred, oils & condiments, baking, spices,
+    nuts & seeds. not_duplicate=true only for something genuinely different
+    from a near match the tool names (brown sugar beside sugar).
     """
     return _wrap(tools.add_ingredient)(name, aisle, kcal, protein, carbs, fat, fiber, offers,
-                                       perishable, g_per_cup, unit_g)
+                                       perishable, g_per_cup, unit_g, not_duplicate)
 
 
 # ── recipes ──────────────────────────────────────────────────
