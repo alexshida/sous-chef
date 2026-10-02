@@ -43,7 +43,8 @@ For Claude suggestions, install [Claude Code](https://claude.com/claude-code) an
 
 ```bash
 sous-chef web              # http://localhost:8766  (trainer uses 8765; both can run)
-sous-chef install-service  # optional: start at login, restart if it stops
+sous-chef install-service  # optional: run in the background, start at login
+sous-chef restart          # restart that background service, e.g. after a git pull
 sous-chef dedupe           # list recipes saved more than once; --apply merges them
 ```
 

@@ -2,6 +2,7 @@
 
     sous-chef web                 — the planner at http://localhost:8766 (and your tailnet)
     sous-chef install-service     — keep it running in the background (macOS launchd)
+    sous-chef restart             — restart that background service, e.g. after a git pull
     sous-chef mcp                 — the MCP server, for attaching to any Claude client
     sous-chef dedupe [--apply]    — merge recipes that were saved more than once
     sous-chef prices export FILE  — your price table as CSV, to edit in a spreadsheet
@@ -19,6 +20,11 @@ from rich.console import Console
 
 console = Console()
 DEFAULT_PORT = 8766   # Trainer has 8765; both can run side by side
+SERVICE_LABEL = "com.sous-chef.web"
+
+
+def _plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
 
 
 @click.group()
@@ -77,8 +83,8 @@ def install_service(port: int, remove: bool):
     import plistlib
     import subprocess
 
-    label = "com.sous-chef.web"
-    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    label = SERVICE_LABEL
+    plist_path = _plist_path()
 
     if remove:
         subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
@@ -121,7 +127,62 @@ def install_service(port: int, remove: bool):
     console.print("[green]✓ sous-chef will start on login and restart if it stops[/green]")
     console.print(f"  [cyan]http://localhost:{port}[/cyan] [dim]— works on any network[/dim]")
     console.print(f"  [dim]logs: {log}[/dim]")
-    console.print("  [dim]remove with [cyan]sous-chef install-service --remove[/cyan][/dim]")
+    console.print("  [dim]restart with [cyan]sous-chef restart[/cyan], remove with "
+                  "[cyan]sous-chef install-service --remove[/cyan][/dim]")
+
+
+@cli.command()
+def restart():
+    """Restart the background service — after a git pull, say.
+
+    Only for the service set up by install-service; a `sous-chef web` running
+    in a terminal is restarted with Ctrl-C and running it again.
+    """
+    import os
+    import plistlib
+    import subprocess
+
+    plist_path = _plist_path()
+    if sys.platform != "darwin" or not plist_path.exists():
+        console.print("[yellow]No background service is installed.[/yellow] Set one up with "
+                      "[cyan]sous-chef install-service[/cyan], or if `sous-chef web` is running "
+                      "in a terminal, stop it with Ctrl-C and start it again.")
+        raise SystemExit(1)
+
+    target = f"gui/{os.getuid()}/{SERVICE_LABEL}"
+    done = subprocess.run(["launchctl", "kickstart", "-k", target], capture_output=True, text=True)
+    if done.returncode != 0:
+        # Installed but not loaded (after `launchctl unload`, say): load it.
+        done = subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True, text=True)
+    if done.returncode != 0:
+        console.print(f"[red]✗ launchctl said: {(done.stderr or done.stdout).strip()}[/red]")
+        raise SystemExit(1)
+
+    args = plistlib.loads(plist_path.read_bytes()).get("ProgramArguments", [])
+    port = int(args[args.index("--port") + 1]) if "--port" in args else DEFAULT_PORT
+    from sous_chef.config import SOUS_CHEF_DIR
+    if _wait_for_server(port):
+        console.print(f"[green]✓ Restarted[/green]  [cyan]http://localhost:{port}[/cyan]")
+    else:
+        console.print(f"[yellow]⚠ Restarted, but nothing answers on port {port} yet.[/yellow] "
+                      f"[dim]Check {SOUS_CHEF_DIR / 'web.log'}[/dim]")
+
+
+def _wait_for_server(port: int, seconds: float = 15.0) -> bool:
+    """True once the planner answers on `port`."""
+    import time
+    import urllib.request
+
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/prefs", timeout=1) as r:
+                if r.status == 200:
+                    return True
+        except OSError:
+            pass
+        time.sleep(0.3)
+    return False
 
 
 @cli.command()
