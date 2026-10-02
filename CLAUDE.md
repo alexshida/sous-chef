@@ -49,6 +49,16 @@ carried. A user price and a "not carried here" both survive it.
 
 ## Traps
 
+- **A chef run outlives the request that started it, so there is one per plan.**
+  A locking phone drops the stream, but the CLI keeps going (it should: its
+  recipes still land). The page used to treat the drop as the end and re-enable
+  its buttons, so the next tap started a second run on the same week. Both read
+  the same `already_offered` and saved near-identical recipes. Now `chef.Job`
+  is driven by a background thread, any request for that plan follows it from
+  the start, `/api/chef/stream` reconnects, and the page keeps retrying instead
+  of giving up. `propose_recipe` also refuses a title already offered this week
+  or in the library, and `sous-chef dedupe` merges copies saved before that.
+
 - **MCP tool errors must raise `mcp.server.mcpserver.exceptions.ToolError`.** In mcp
   2.x anything else is treated as a crash, and the model sees only "Error executing
   tool <name>". It never learns that `salmon-fillet` should have been `salmon`. An
