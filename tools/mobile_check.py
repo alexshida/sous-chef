@@ -67,7 +67,16 @@ def main() -> int:
                 page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
                 page.goto(args.url, wait_until="networkidle")
                 for tab in TABS:
-                    page.click(f'nav.tabs button[data-tab="{tab}"]')
+                    try:
+                        page.click(f'nav.tabs button[data-tab="{tab}"]', timeout=5000)
+                    except Exception:
+                        # What overflow does on a phone: the page zooms out to
+                        # fit, and the fixed tab bar ends up under the content.
+                        res = page.evaluate(PROBE)
+                        problems.append(f"{scheme} {width}px: the {tab} tab could not be tapped "
+                                        f"(scrollWidth {res['scroll']} > {res['vw']}): "
+                                        + "; ".join(res["overflow"]))
+                        break
                     page.wait_for_load_state("networkidle")
                     page.wait_for_timeout(250)
                     res = page.evaluate(PROBE)
