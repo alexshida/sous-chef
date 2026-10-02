@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError as MCPToolError
 from pydantic import BaseModel, Field
 
 from sous_chef import tools
@@ -38,17 +39,18 @@ mcp = MCPServer(name="sous-chef", version="0.1.0", instructions=INSTRUCTIONS)
 
 
 def _wrap(fn):
-    """Re-raise ToolError so the model reads the reason, not a stack trace.
+    """Re-raise ToolError as the MCP SDK's own ToolError, so the model reads the reason.
 
-    Returning {"error": ...} instead breaks any tool declaring a list return
-    type: the error dict fails structured-output validation and the model sees
-    "1 validation error" rather than the actual problem.
+    Anything else raised from a tool counts as a crash: the SDK replaces it
+    with a bare "Error executing tool <name>" and the model never learns that
+    'salmon-fillet' should have been 'salmon'. Returning {"error": ...} is no
+    better — it fails structured-output validation on tools that return lists.
     """
     def call(*args, **kwargs) -> Any:
         try:
             return fn(*args, **kwargs)
         except tools.ToolError as e:
-            raise ValueError(str(e)) from None
+            raise MCPToolError(str(e)) from None
     call.__name__ = fn.__name__
     call.__doc__ = fn.__doc__
     return call

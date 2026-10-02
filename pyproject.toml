@@ -19,8 +19,8 @@ dependencies = [
     # Calendar feeds: parsing, and expanding recurring events into the week
     "icalendar>=6.0",
     "recurring-ical-events>=3.3",
-    # MCP server
-    "mcp>=1.29",
+    # MCP server (2.x: MCPServer, and ToolError messages that reach the model)
+    "mcp>=2.0",
     # Web app
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
