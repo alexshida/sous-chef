@@ -232,3 +232,65 @@ def test_a_twin_of_an_existing_ingredient_is_refused(fresh_db):
 def test_a_proposed_recipe_reports_the_servings_it_was_written_for(plan):
     out = tools.propose_recipe({**GOOD, "servings": 3}, plan["id"])
     assert out["servings"] == 3
+
+
+# ── duplicates ───────────────────────────────────────────────
+
+def test_the_same_suggestion_saved_twice_is_one_recipe(plan):
+    first = tools.propose_recipe(GOOD, plan["id"])
+    again = tools.propose_recipe(GOOD, plan["id"])
+    assert again["id"] == first["id"] and again["already_saved"]
+    titles = [c["title"] for c in tools.get_plan(plan["id"])["candidates"]]
+    assert titles.count(GOOD["title"]) == 1
+
+
+def test_a_reused_title_is_refused_with_advice_for_the_origin(plan):
+    tools.propose_recipe(GOOD, plan["id"])
+    variant = {**GOOD, "title": "chickpea and spinach stew!",
+               "ingredients": GOOD["ingredients"][:2]}
+    with pytest.raises(tools.ToolError) as e:
+        tools.propose_recipe(variant, plan["id"])
+    assert "already offered this week" in str(e.value) and "different dish" in str(e.value)
+    with pytest.raises(tools.ToolError) as e:
+        tools.propose_recipe({**variant}, plan["id"], "import")
+    assert "title that tells them apart" in str(e.value)
+
+
+def test_a_title_in_the_library_counts(plan):
+    seeded = db.list_recipes()[0]
+    clash = {**GOOD, "title": seeded["title"]}
+    with pytest.raises(tools.ToolError) as e:
+        tools.propose_recipe(clash, plan["id"])
+    assert "in the library" in str(e.value)
+
+
+def test_existing_duplicates_merge_into_the_chosen_copy(plan):
+    clean = tools._validate_recipe(GOOD, db.all_ingredients())
+    a = db.insert_recipe(clean, source="claude", in_library=False)
+    b = db.insert_recipe(clean, source="claude", in_library=False)
+    c = db.insert_recipe(clean, source="claude", in_library=False)
+    db.add_candidate(plan["id"], a, "claude")
+    db.add_candidate(plan["id"], b, "claude")
+    db.dismiss_candidate(plan["id"], a)
+    tools.select_recipe(plan["id"], c, 6)
+
+    found = tools.find_duplicate_recipes()
+    assert found == [{"title": GOOD["title"], "keep": c, "remove": [a, b]}]
+    assert db.get_recipe(a)                              # a dry run changes nothing
+
+    tools.merge_duplicate_recipes(apply=True)
+    assert db.get_recipe(a) is None and db.get_recipe(b) is None
+    p = tools.get_plan(plan["id"])
+    assert [s["id"] for s in p["selected"]] == [c] and p["selected"][0]["servings"] == 6
+    assert tools.find_duplicate_recipes() == []
+
+
+def test_merging_keeps_a_copy_visible_if_either_was(plan):
+    clean = tools._validate_recipe(GOOD, db.all_ingredients())
+    a = db.insert_recipe(clean, source="claude", in_library=True)
+    b = db.insert_recipe(clean, source="claude", in_library=False)
+    db.add_candidate(plan["id"], a, "claude")
+    db.add_candidate(plan["id"], b, "claude")
+    db.dismiss_candidate(plan["id"], a)
+    tools.merge_duplicate_recipes(apply=True)
+    assert [c["id"] for c in tools.get_plan(plan["id"])["candidates"]] == [a]

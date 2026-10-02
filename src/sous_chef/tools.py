@@ -411,14 +411,93 @@ def propose_recipe(recipe: dict, plan_id: int | None = None, origin: str = "clau
     if plan_id is not None and not db.get_plan(plan_id):
         raise ToolError(f"No plan {plan_id}.")
     clean = _validate_recipe(recipe, _catalog())
-    rid = db.insert_recipe(clean, source=origin, in_library=origin != "claude")
+    existing, where = _same_title(clean["title"], plan_id)
+    already = False
+    if existing and _same_dish(existing, clean):
+        # The same recipe saved again (a repeated request, a retried call):
+        # offer the one that exists rather than a second copy of it.
+        rid, already = existing["id"], True
+        if origin != "claude":
+            db.set_in_library(rid, True)
+    elif existing:
+        if origin == "claude":
+            raise ToolError(f"'{existing['title']}' is already {where} (recipe {existing['id']}). "
+                            "Propose a different dish.")
+        raise ToolError(f"A different recipe called '{existing['title']}' is already {where} "
+                        f"(recipe {existing['id']}). Give this one a title that tells them apart, "
+                        "e.g. by its source or what makes it different.")
+    else:
+        rid = db.insert_recipe(clean, source=origin, in_library=origin != "claude")
     if plan_id is not None:
         db.add_candidate(plan_id, rid, origin)
     # Reported at the servings it was written for; cards scale it to the
     # user's default, and that difference is not something to fix.
     out = get_recipe(rid, plan_id=plan_id)
-    return {k: out[k] for k in ("id", "title", "servings", "total_cost", "cost_per_serving",
-                                "per_serving", "targets", "unavailable", "stores")}
+    result = {k: out[k] for k in ("id", "title", "servings", "total_cost", "cost_per_serving",
+                                  "per_serving", "targets", "unavailable", "stores")}
+    if already:
+        result["already_saved"] = True
+    return result
+
+
+def title_key(title: str) -> str:
+    """A title reduced to what makes two recipes "the same name"."""
+    t = title.lower().replace("&", " and ")
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+
+
+def _same_title(title: str, plan_id: int | None) -> tuple[dict | None, str]:
+    """A recipe with this title already offered or chosen this week, or in the library."""
+    key = title_key(title)
+    if plan_id is not None:
+        ids = ({c["recipe_id"] for c in db.candidates(plan_id, include_dismissed=True)}
+               | {s["recipe_id"] for s in db.selections(plan_id)})
+        for rid in sorted(ids):
+            r = db.get_recipe(rid)
+            if r and title_key(r["title"]) == key:
+                return r, "offered this week"
+    for r in db.list_recipes(library_only=True):
+        if title_key(r["title"]) == key:
+            return r, "in the library"
+    return None, ""
+
+
+def _same_dish(a: dict, b: dict) -> bool:
+    def lines(r):
+        return sorted((i["id"], normalize_unit(i["unit"]), round(float(i["qty"]), 3))
+                      for i in r["ingredients"])
+    return a["servings"] == b["servings"] and lines(a) == lines(b)
+
+
+def find_duplicate_recipes() -> list[dict]:
+    """Recipes sharing a title, grouped, with the copy to keep.
+
+    The keeper is one chosen in some plan if there is one, then one in the
+    library, then the oldest.
+    """
+    chosen = db.chosen_recipe_ids()
+    groups: dict[str, list[dict]] = {}
+    for r in db.list_recipes(library_only=False):
+        groups.setdefault(title_key(r["title"]), []).append(r)
+    out = []
+    for copies in groups.values():
+        if len(copies) < 2:
+            continue
+        copies.sort(key=lambda r: (r["id"] not in chosen, not r["in_library"], r["id"]))
+        out.append({"title": copies[0]["title"], "keep": copies[0]["id"],
+                    "remove": [r["id"] for r in copies[1:]]})
+    return sorted(out, key=lambda g: g["title"].lower())
+
+
+def merge_duplicate_recipes(apply: bool = False) -> list[dict]:
+    """Fold each duplicate into the copy kept: its places in plans move over,
+    then it is deleted. Without `apply`, only reports what would happen."""
+    groups = find_duplicate_recipes()
+    if apply:
+        for g in groups:
+            for dup in g["remove"]:
+                db.merge_recipe(keep=g["keep"], dup=dup)
+    return groups
 
 
 def save_to_library(recipe_id: int, keep: bool = True) -> dict:

@@ -326,6 +326,38 @@ def delete_recipe(rid: int) -> bool:
         return conn.execute("DELETE FROM recipes WHERE id = ?", (rid,)).rowcount > 0
 
 
+def chosen_recipe_ids() -> set[int]:
+    with get_conn() as conn:
+        return {r[0] for r in conn.execute("SELECT DISTINCT recipe_id FROM plan_recipes")}
+
+
+def merge_recipe(*, keep: int, dup: int) -> None:
+    """Move `dup`'s places in plans onto `keep`, then delete `dup`.
+
+    Where both are in the same plan, `keep`'s row stays — but a candidate stays
+    visible if either copy was, since dismissing one of two copies means "one
+    is enough", not "neither".
+    """
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE plan_candidates SET dismissed = 0
+               WHERE recipe_id = ? AND plan_id IN (
+                   SELECT plan_id FROM plan_candidates WHERE recipe_id = ? AND dismissed = 0)""",
+            (keep, dup))
+        conn.execute(
+            """INSERT OR IGNORE INTO plan_candidates (plan_id, recipe_id, origin, dismissed, added_at)
+               SELECT plan_id, ?, origin, dismissed, added_at FROM plan_candidates
+               WHERE recipe_id = ?""", (keep, dup))
+        conn.execute(
+            """INSERT OR IGNORE INTO plan_recipes (plan_id, recipe_id, servings, cook_date, added_at)
+               SELECT plan_id, ?, servings, cook_date, added_at FROM plan_recipes
+               WHERE recipe_id = ?""", (keep, dup))
+        conn.execute(
+            """UPDATE recipes SET in_library = MAX(in_library,
+                   (SELECT in_library FROM recipes WHERE id = ?)) WHERE id = ?""", (dup, keep))
+        conn.execute("DELETE FROM recipes WHERE id = ?", (dup,))
+
+
 def recently_cooked(since_week: str) -> set[int]:
     """Recipes chosen in any plan whose week starts on or after `since_week`."""
     with get_conn() as conn:

@@ -3,6 +3,7 @@
     sous-chef web                 — the planner at http://localhost:8766 (and your tailnet)
     sous-chef install-service     — keep it running in the background (macOS launchd)
     sous-chef mcp                 — the MCP server, for attaching to any Claude client
+    sous-chef dedupe [--apply]    — merge recipes that were saved more than once
     sous-chef prices export FILE  — your price table as CSV, to edit in a spreadsheet
     sous-chef prices import FILE  — read it back
 """
@@ -130,6 +131,31 @@ def mcp(transport: str):
     """Run the MCP server (the recipe chef's tools)."""
     from sous_chef.mcp.server import main as run_server
     run_server(transport=transport)
+
+
+@cli.command()
+@click.option("--apply", "do_apply", is_flag=True, help="Merge them (default: only list them)")
+def dedupe(do_apply: bool):
+    """Find recipes saved more than once and merge each set into one.
+
+    The copy kept is one you chose in a plan if any, then one in your library,
+    then the oldest. The others' places in plans move onto it.
+    """
+    from sous_chef import tools
+    from sous_chef.storage.db import init_db
+    init_db()
+    groups = tools.merge_duplicate_recipes(apply=do_apply)
+    if not groups:
+        console.print("[green]✓ No duplicate recipes[/green]")
+        return
+    for g in groups:
+        console.print(f"  {g['title']}  [dim]keep #{g['keep']}, "
+                      f"{'merged' if do_apply else 'would merge'} "
+                      f"{', '.join('#' + str(r) for r in g['remove'])}[/dim]")
+    if do_apply:
+        console.print(f"[green]✓ Merged {sum(len(g['remove']) for g in groups)} duplicate(s)[/green]")
+    else:
+        console.print("[dim]Run [cyan]sous-chef dedupe --apply[/cyan] to merge them.[/dim]")
 
 
 @cli.group()
