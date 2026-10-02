@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sous-chef"
+version = "0.1.0"
+description = "Weekly meal planner: Claude proposes recipes from your grocery stores, the code does the costing, nutrition and grocery list"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # CLI
+    "click>=8.1.7",
+    "rich>=13.9.0",
+    # Config
+    "python-dotenv>=1.0.0",
+    # HTTP (calendar feeds)
+    "httpx>=0.27.0",
+    # Calendar feeds: parsing, and expanding recurring events into the week
+    "icalendar>=6.0",
+    "recurring-ical-events>=3.3",
+    # MCP server
+    "mcp>=1.29",
+    # Web app
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "playwright>=1.45"]
+
+[project.scripts]
+sous-chef = "sous_chef.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sous_chef"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,18 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.sqlite
+*.db
+.DS_Store
+.idea/
+.vscode/
+*.swp
+node_modules/
+.pytest_cache/
+
+# Local Claude Code settings (per-machine, not shared)
+.claude/settings.local.json
