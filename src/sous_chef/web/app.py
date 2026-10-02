@@ -7,6 +7,7 @@ The REST endpoints are deliberately thin — every one is a direct call into
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,13 @@ from sous_chef.web import chef
 
 STATIC = Path(__file__).parent / "static"
 
-app = FastAPI(title="sous-chef", docs_url="/api/docs")
+@asynccontextmanager
+async def _lifespan(_app):
+    init_db()
+    yield
+
+
+app = FastAPI(title="sous-chef", docs_url="/api/docs", lifespan=_lifespan)
 
 
 @app.middleware("http")
@@ -33,11 +40,6 @@ async def _restrict_to_private_networks(request, call_next):
         return JSONResponse({"detail": "sous-chef serves loopback and your tailnet only."},
                             status_code=403)
     return await call_next(request)
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    init_db()
 
 
 def _call(fn, *args, **kwargs) -> Any:
