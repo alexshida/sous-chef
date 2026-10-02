@@ -70,6 +70,11 @@ carried. A user price and a "not carried here" both survive it.
   an unavailable "Fish sauce". `add_ingredient` refuses near-duplicates (one name's
   words contain the other's) unless `not_duplicate=true`. The prompt says to reuse
   existing ingredients and list offers only where it's confident.
+- **A tag that cannot wrap widens the whole page.** `.pill` is `nowrap`, so one
+  listing a dozen shared ingredients made a 375 px phone lay out 1087 px wide;
+  the browser zoomed out to fit and the tab bar stopped taking taps. Tags that
+  list things carry `.pill.list` (wraps) and go through `few()` ("+9 more").
+  `tests/test_mobile_layout.py` serves deliberately awkward data to catch it.
 - **`x or default` turns 0 into the default.** Servings use `default if x is None
   else x`, then validate.
 - **`INSERT OR IGNORE` burns AUTOINCREMENT ids.** Seeding checks for existing
