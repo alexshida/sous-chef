@@ -130,7 +130,8 @@ def test_index_page_is_served(client):
 
 
 def test_first_visit_creates_a_plan_with_suggestions(client):
-    assert client.get("/api/plan").status_code == 404
+    first = client.get("/api/plan")
+    assert first.status_code == 200 and first.json() is None
     plan = client.post("/api/plan", json={}).json()
     assert plan["candidates"] and client.get("/api/plan").json()["id"] == plan["id"]
 

@@ -353,11 +353,7 @@ function showTab(tab){
 
 // ── plan ───────────────────────────────────────────────────
 async function loadPlan(){
-  try{ S.plan = await api('GET', '/api/plan'); }
-  catch(e){
-    if(e.status === 404) S.plan = await api('POST', '/api/plan', {});
-    else throw e;
-  }
+  S.plan = await api('GET', '/api/plan') || await api('POST', '/api/plan', {});
   renderPlan();
 }
 function setPlan(p){ S.plan = p; S.grocery = null; renderPlan(); }

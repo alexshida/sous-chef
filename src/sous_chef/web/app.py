@@ -75,12 +75,13 @@ class NewPlan(BaseModel):
 
 @app.get("/api/plan")
 def api_current_plan():
-    """The latest plan, or a 404 the page answers by starting one."""
+    """The latest plan, or null — which the page answers by starting one.
+
+    Not a 404: a first visit is normal, and a 404 lands in the console as an error.
+    """
     from sous_chef.storage import db
     latest = db.latest_plan()
-    if not latest:
-        raise HTTPException(status_code=404, detail="No plan yet.")
-    return _call(tools.get_plan, latest["id"])
+    return _call(tools.get_plan, latest["id"]) if latest else None
 
 
 @app.post("/api/plan")
