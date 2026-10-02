@@ -32,7 +32,7 @@ def package_grams(ing: dict, offer: dict) -> float:
 def cost_recipe(recipe: dict, catalog: dict[str, dict], *, servings: int | None = None,
                 stores: list[str], pantry: set[str] = frozenset()) -> dict:
     """Cost, nutrition and scaled ingredient lines for `recipe` at `servings`."""
-    servings = int(servings or recipe["servings"])
+    servings = int(recipe["servings"] if servings is None else servings)
     if servings < 1:
         raise ValueError("servings must be at least 1")
     factor = servings / recipe["servings"]

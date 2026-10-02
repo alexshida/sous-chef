@@ -658,7 +658,7 @@ def select_recipe(plan_id: int, recipe_id: int, servings: int | None = None) -> 
     plan = _plan_or_raise(plan_id)
     if not db.get_recipe(recipe_id):
         raise ToolError(f"No recipe {recipe_id}.")
-    servings = int(servings or _prefs().default_servings)
+    servings = int(_prefs().default_servings if servings is None else servings)
     if not 1 <= servings <= 24:
         raise ToolError("servings must be between 1 and 24")
     db.select_recipe(plan["id"], recipe_id, servings)
