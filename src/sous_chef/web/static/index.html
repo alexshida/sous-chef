@@ -294,7 +294,7 @@ const STATUS_CYCLE = [null, 'home', 'busy', 'out', 'away'];
 const ORIGIN = {library:'', claude:'✨ Claude', craft:'✨ Crafted', import:'Imported'};
 
 const S = {plan:null, prefs:null, tab:'plan', grocery:null, recipes:null, catalog:null,
-           chef:{busy:false, lines:[]}, open:{}, sheet:null, cuisine:''};
+           chef:{busy:false, lines:[], saved:new Set()}, open:{}, sheet:null, cuisine:''};
 
 // ── plumbing ───────────────────────────────────────────────
 async function api(method, path, body){
@@ -522,47 +522,114 @@ function renderCands(p){
 }
 
 // ── chef ───────────────────────────────────────────────────
+// A run lives on the Mac, not in this page. If the stream drops — the phone
+// locked, Safari went to the background — the run carries on, so the page
+// reconnects to it and keeps its buttons disabled. Giving up instead let a
+// second tap start a second run on the same week, and the two saved copies
+// of each other's recipes.
+function chefPush(text, cls){
+  S.chef.lines.push({text, cls}); S.chef.lines = S.chef.lines.slice(-6); renderCands(S.plan);
+}
+let chefRefreshTimer = null;
+function chefRefresh(){
+  clearTimeout(chefRefreshTimer);
+  chefRefreshTimer = setTimeout(async () => {
+    try{ S.plan = await api('GET', `/api/plan/${S.plan.id}`); renderPlan(); }catch(e){}
+  }, 250);
+}
+
+// Read one chef stream. Resolves 'done', 'idle', or 'dropped' (ended early).
+async function followChef(res){
+  if(!res.ok || !res.body) return 'dropped';
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = '';
+  for(;;){
+    let chunk;
+    try{ chunk = await reader.read(); }catch(e){ return 'dropped'; }
+    if(chunk.done) return 'dropped';
+    buf += dec.decode(chunk.value, {stream:true});
+    let i;
+    while((i = buf.indexOf('\n\n')) >= 0){
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      if(!block.startsWith('data: ')) continue;          // keepalive comments
+      const ev = JSON.parse(block.slice(6));
+      if(ev.type === 'idle') return 'idle';
+      if(ev.type === 'attached'){
+        // A replay from the start follows, so start the lines over.
+        const asked = S.chef.asked;
+        S.chef = {busy:true, lines:[], saved:new Set(), asked};
+        if(asked && asked !== 'reconnect') chefPush('Still finishing the last request — joined it rather than starting another.');
+        else renderCands(S.plan);
+      }
+      else if(ev.type === 'status') chefPush(esc(ev.text));
+      else if(ev.type === 'recipe'){ S.chef.saved.add(ev.id); chefPush('✓ ' + esc(ev.title), 'done'); chefRefresh(); }
+      else if(ev.type === 'retry') chefPush('Fixing: ' + esc(ev.text));
+      else if(ev.type === 'text') chefPush('<span class="muted">' + esc(ev.text) + '</span>');
+      else if(ev.type === 'error') chefPush(esc(ev.text), 'bad');
+      else if(ev.type === 'done') return 'done';
+    }
+  }
+}
+
 async function runChef(body){
   if(S.chef.busy) return;
-  S.chef = {busy:true, lines:[]};
+  S.chef = {busy:true, lines:[], saved:new Set(), asked: body.task};
   renderCands(S.plan);
   $('#chef-anchor')?.scrollIntoView({behavior:'smooth', block:'center'});
-  const push = (text, cls) => { S.chef.lines.push({text, cls}); S.chef.lines = S.chef.lines.slice(-6); renderCands(S.plan); };
-  let saved = 0, refreshTimer = null;
-  const refresh = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(async () => {
-    try{ S.plan = await api('GET', `/api/plan/${S.plan.id}`); renderPlan(); }catch(e){}
-  }, 250); };
+  let outcome = 'dropped';
   try{
     const res = await fetch('/api/chef', {method:'POST', headers:{'Content-Type':'application/json'},
                                           body: JSON.stringify({plan_id: S.plan.id, ...body})});
-    if(!res.ok || !res.body) throw new Error(`chef: ${res.status}`);
-    const reader = res.body.getReader(), dec = new TextDecoder();
-    let buf = '';
-    for(;;){
-      const {value, done} = await reader.read();
-      if(done) break;
-      buf += dec.decode(value, {stream:true});
-      let i;
-      while((i = buf.indexOf('\n\n')) >= 0){
-        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
-        if(!chunk.startsWith('data: ')) continue;
-        const ev = JSON.parse(chunk.slice(6));
-        if(ev.type === 'status') push(esc(ev.text));
-        else if(ev.type === 'recipe'){ saved++; push('✓ ' + esc(ev.title), 'done'); refresh(); }
-        else if(ev.type === 'retry') push('Fixing: ' + esc(ev.text), '');
-        else if(ev.type === 'text') push('<span class="muted">' + esc(ev.text) + '</span>');
-        else if(ev.type === 'error') push(esc(ev.text), 'bad');
-      }
-    }
-  }catch(e){
-    push(esc(e.message === 'offline' ? "Couldn't reach your Mac." : e.message), 'bad');
-  }finally{
-    S.chef.busy = false;
-    if(saved) S.chef.lines = S.chef.lines.filter(l => l.cls === 'done' || l.cls === 'bad');
-    try{ S.plan = await api('GET', `/api/plan/${S.plan.id}`); }catch(e){}
-    renderPlan();
-    if(S.tab === 'recipes') loadRecipes();
+    outcome = await followChef(res);
+  }catch(e){ /* never reached the Mac, or dropped at once */ }
+  if(outcome === 'dropped') return reconnectChef();
+  endChef();
+}
+
+// Wait `ms`, but never while the page is hidden: a locked phone does nothing.
+function pause(ms){
+  return new Promise(resolve => {
+    const finish = () => { clearTimeout(t); document.removeEventListener('visibilitychange', onVis); resolve(); };
+    const onVis = () => { if(document.visibilityState === 'visible') finish(); };
+    const t = setTimeout(() => { if(document.visibilityState === 'visible') finish(); }, ms);
+    document.addEventListener('visibilitychange', onVis);
+  });
+}
+
+async function reconnectChef(){
+  chefPush('Lost the connection — your Mac is still working on it. Reconnecting…');
+  S.chef.asked = 'reconnect';
+  for(let attempt = 0; attempt < 40; attempt++){
+    try{
+      const res = await fetch(`/api/chef/stream?plan_id=${S.plan.id}&recent=1`);
+      const outcome = await followChef(res);
+      if(outcome === 'done' || outcome === 'idle') return endChef();
+    }catch(e){}
+    await pause(3000);
   }
+  chefPush("Couldn't reconnect. Anything the chef saved will appear once your Mac is reachable.", 'bad');
+  endChef();
+}
+
+// On opening the app: if a run is going on the Mac, show it and follow it.
+async function resumeChef(){
+  if(S.chef.busy || !S.plan) return;
+  let res;
+  try{ res = await fetch(`/api/chef/stream?plan_id=${S.plan.id}`); }catch(e){ return; }
+  S.chef.asked = 'reconnect';
+  const outcome = await followChef(res);
+  if(outcome === 'idle') return;
+  if(outcome === 'dropped') return reconnectChef();
+  endChef();
+}
+
+async function endChef(){
+  const saved = S.chef.saved ? S.chef.saved.size : 0;
+  S.chef.busy = false;
+  if(saved) S.chef.lines = S.chef.lines.filter(l => l.cls === 'done' || l.cls === 'bad');
+  try{ S.plan = await api('GET', `/api/plan/${S.plan.id}`); }catch(e){}
+  renderPlan();
+  if(S.tab === 'recipes') loadRecipes();
 }
 
 // ── recipe sheet ───────────────────────────────────────────
@@ -971,6 +1038,7 @@ if('serviceWorker' in navigator && window.isSecureContext){
   try{
     S.prefs = await api('GET', '/api/prefs');
     await loadPlan();
+    resumeChef();
     let tab = 'plan';
     try{ tab = localStorage.getItem('sc-tab') || 'plan'; }catch(e){}
     showTab(tab);
@@ -983,6 +1051,7 @@ document.addEventListener('visibilitychange', async () => {
     await refreshPlanQuietly();
     if(S.tab === 'plan') renderPlan();
     if(S.tab === 'shop') loadShop();
+    resumeChef();   // started from another device, or before a reload
   }
 });
 </script>
