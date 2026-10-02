@@ -32,7 +32,7 @@ subscription pays for suggestions, with no API key and nothing to host.
 
 ```bash
 git clone https://github.com/alexshida/sous-chef && cd sous-chef
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv --prompt sous-chef .venv && source .venv/bin/activate   # prompt shows (sous-chef)
 pip install -e .
 ```
 
