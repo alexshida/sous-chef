@@ -18,6 +18,11 @@ DEFAULT_MODEL = os.environ.get("SOUS_CHEF_MODEL", "sonnet")
 
 STORES = {"tj": "Trader Joe's", "qfc": "QFC", "pcc": "PCC", "costco": "Costco"}
 
+# Offer sources that are yours: typed in, or read off your own receipt. Every
+# other price (starting estimates, Claude's guesses, prices found online) is an
+# estimate, and nothing found online replaces one of these.
+FIRM_SOURCES = ("user", "receipt")
+
 CUISINES = {
     "east_asian": "East Asian",
     "indian": "Indian",
@@ -58,6 +63,8 @@ class Preferences:
     prep_start: str = "13:00"             # meal-prep mode: when the prep session starts
     batch_library: int = 3                # a fresh batch: picks from your library…
     batch_claude: int = 3                 # …and new ideas from Claude
+    price_refresh_days: int = 30          # check prices online this often (0 = never)
+    price_check_items: int = 12           # prices looked up per check
     calendar_feeds: list[str] = field(default_factory=list)
     timezone: str = "America/Los_Angeles"
     notes: str = ""                       # anything else the chef should know

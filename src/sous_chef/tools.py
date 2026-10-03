@@ -21,11 +21,11 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import asdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sous_chef import calendars, grocery, schedule, similarity
-from sous_chef.config import CUISINES, STORES, Preferences, load_prefs, save_prefs
+from sous_chef.config import CUISINES, FIRM_SOURCES, STORES, Preferences, load_prefs, save_prefs
 from sous_chef.costing import choose_offer, cost_recipe, meets_targets, package_grams
 from sous_chef.storage import db
 from sous_chef.units import UnitError, allowed_units, format_qty, normalize_unit, to_grams
@@ -84,6 +84,8 @@ def update_preferences(changes: dict) -> dict:
         raise ToolError("prep_start must look like 13:00")
     if not 0 <= merged.batch_library <= 8 or not 0 <= merged.batch_claude <= 6:
         raise ToolError("a fresh batch takes 0–8 library picks and 0–6 Claude ideas")
+    if not 0 <= merged.price_refresh_days <= 365 or not 1 <= merged.price_check_items <= 40:
+        raise ToolError("price checks run every 0–365 days (0 = never) and look up 1–40 prices")
     try:
         schedule.parse_hhmm(merged.dinner_time)
     except ValueError:
@@ -101,7 +103,9 @@ def _offer_view(o: dict) -> dict:
     return {"store": o["store"], "store_name": STORES.get(o["store"], o["store"]),
             "product": o["product"], "package": f"{format_qty(o['pkg_qty'])} {o['pkg_unit']}",
             "pkg_qty": o["pkg_qty"], "pkg_unit": o["pkg_unit"], "price": o["price"],
-            "source": o["source"], "carried": bool(o["carried"])}
+            "source": o["source"], "carried": bool(o["carried"]),
+            "source_url": o.get("source_url"), "checked_at": o.get("checked_at"),
+            "updated_at": o.get("updated_at")}
 
 
 def _ingredient_view(ing: dict, *, pantry: set[str], stores: list[str] | None = None) -> dict:
@@ -270,6 +274,198 @@ def set_carried(ingredient_id: str, store: str, carried: bool) -> dict:
     if not db.set_carried(ingredient_id, store, carried):
         raise ToolError(f"No offer for {ingredient_id} at {STORES.get(store, store)} to change.")
     return get_ingredient(ingredient_id)
+
+
+# ── prices found online ──────────────────────────────────────
+#
+# A price check is a chef run with web search: Claude looks each item up on
+# the store's own listing and records what it read, with the page it read it
+# on. These tools are the only way it can touch a price, and they hold the
+# line the model would otherwise be trusted to hold: a price you entered or
+# scanned is never replaced, only an offer a store already has can be
+# updated, and a price per pound that jumps more than threefold is sent back
+# for a second look, since that is nearly always a package-size mix-up (a
+# multi-pack, a per-lb price, a different size).
+
+PRICE_RUN = "price_check"
+_MAX_JUMP = 3.0
+
+
+def _price_priorities() -> dict[str, int]:
+    """How much each ingredient's price matters: 0 used in a recent or current
+    plan, 1 in a library recipe; anything else ranks after both."""
+    since = (schedule.default_week_start() - timedelta(weeks=4)).isoformat()
+    planned = db.recently_cooked(since)
+    latest = db.latest_plan()
+    if latest:
+        planned |= {c["recipe_id"] for c in db.candidates(latest["id"])}
+    rank: dict[str, int] = {}
+    for r in db.list_recipes(library_only=False):
+        tier = 0 if r["id"] in planned else 1 if r["in_library"] else None
+        if tier is None:
+            continue
+        for line in r["ingredients"]:
+            rank[line["id"]] = min(rank.get(line["id"], tier), tier)
+    return rank
+
+
+def _per_lb(price: float, grams: float) -> str:
+    return f"${price / grams * 453.6:.2f}/lb"
+
+
+def _price_stores() -> list[str]:
+    """Your stores, plus any this week's plan added (Costco for a prep week)."""
+    stores = list(_prefs().stores)
+    latest = db.latest_plan()
+    return stores + [s for s in (latest["stores"] if latest else []) if s not in stores]
+
+
+def prices_to_check(limit: int = 12, stale_days: int = 1,
+                    stores: list[str] | None = None) -> list[dict]:
+    """Estimated prices worth looking up online, most useful first.
+
+    Only offers at your stores (and this week's plan's) that are still
+    estimates and still carried, and not checked within `stale_days`. Ingredients in this week's and recent
+    plans come first, then the library's, with pantry staples (bought rarely)
+    after fresh food, the store each item is actually bought at before the
+    others, and never-checked before longest-ago.
+    """
+    stores = stores or _price_stores()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat(timespec="seconds")
+    rank, pantry = _price_priorities(), db.pantry_ids()
+    rows = []
+    for ing in _catalog().values():
+        buy_at, _ = choose_offer(ing, stores)
+        for store, o in ing["offers"].items():
+            if store not in stores or not o["carried"] or o["source"] in FIRM_SOURCES:
+                continue
+            if stale_days > 0 and o.get("checked_at") and o["checked_at"] > cutoff:
+                continue
+            tier = rank.get(ing["id"], 2) + (ing["id"] in pantry)
+            rows.append(((tier, store != buy_at, o.get("checked_at") or ""), ing, o))
+    rows.sort(key=lambda r: r[0])
+    out = []
+    for _, ing, o in rows[:limit] if limit else rows:
+        try:
+            per_lb = _per_lb(o["price"], package_grams(ing, o))
+        except UnitError:
+            per_lb = None
+        out.append({"ingredient_id": ing["id"], "name": ing["name"], "store": o["store"],
+                    "store_name": STORES.get(o["store"], o["store"]), "product": o["product"],
+                    "price": o["price"], "pkg_qty": o["pkg_qty"], "pkg_unit": o["pkg_unit"],
+                    "per_lb": per_lb, "source": o["source"], "last_checked": o.get("checked_at"),
+                    "units": allowed_units(ing)})
+    return out
+
+
+def _price_offer(ingredient_id: str, store: str) -> tuple[dict, dict]:
+    ing = db.get_ingredient(ingredient_id)
+    if not ing:
+        raise ToolError(_unknown_ingredient(ingredient_id))
+    if store not in STORES:
+        raise ToolError(f"store must be one of {', '.join(STORES)}")
+    offer = ing["offers"].get(store)
+    if not offer:
+        raise ToolError(f"{STORES[store]} has no listing for {ing['name']} in the catalog. A price "
+                        f"check only updates what a store is already listed as selling.")
+    return ing, offer
+
+
+def record_price(ingredient_id: str, store: str, price: float, pkg_qty: float, pkg_unit: str,
+                 product: str, source_url: str, large_change: bool = False) -> dict:
+    """Record a price read off a store's listing, with the page it came from."""
+    ing, offer = _price_offer(ingredient_id, store)
+    where = f"{ing['name']} at {STORES[store]}"
+    if offer["source"] in FIRM_SOURCES:
+        raise ToolError(f"The price for {where} is the user's own (${offer['price']:.2f}); "
+                        f"leave it and move on.")
+    if not offer["carried"]:
+        raise ToolError(f"The user marked {where} as not carried; leave it and move on.")
+    if not price or price <= 0 or not pkg_qty or pkg_qty <= 0:
+        raise ToolError("price and pkg_qty must be positive")
+    if not (source_url or "").startswith(("http://", "https://")):
+        raise ToolError("source_url must be the page the price was read from")
+    if not (product or "").strip():
+        raise ToolError("product is the name on the listing, e.g. \"Greek Nonfat Yogurt Plain\"")
+    unit = normalize_unit(pkg_unit)
+    try:
+        new_g = to_grams(float(pkg_qty), unit, ing)
+    except UnitError as e:
+        raise ToolError(f"{e} Give the package as listed, in one of those units.")
+    try:
+        old_g = package_grams(ing, offer)
+        ratio = (price / new_g) / (offer["price"] / old_g)
+    except (UnitError, ZeroDivisionError):
+        old_g, ratio = None, 1.0
+    if not large_change and not 1 / _MAX_JUMP <= ratio <= _MAX_JUMP:
+        raise ToolError(
+            f"That is {ratio:.1f}× the current price for {where} ({_per_lb(price, new_g)} against "
+            f"{_per_lb(offer['price'], old_g)}) — usually a package-size mix-up: a multi-pack, a "
+            f"price per lb, a different size. Check pkg_qty and pkg_unit describe exactly what "
+            f"the listed price buys; if the listing really says that, call again with "
+            f"large_change=true.")
+    if not db.record_web_price(ingredient_id, store, price=round(float(price), 2),
+                               pkg_qty=float(pkg_qty), pkg_unit=unit, product=product.strip(),
+                               source_url=source_url):
+        raise ToolError(f"The price for {where} was just set by the user; leave it.")
+    return {"ingredient_id": ingredient_id, "name": ing["name"], "store": store,
+            "store_name": STORES[store],
+            "old": {"price": offer["price"], "package": f"{format_qty(offer['pkg_qty'])} {offer['pkg_unit']}"},
+            "new": {"price": round(float(price), 2), "package": f"{format_qty(float(pkg_qty))} {unit}"},
+            "change_pct": round((ratio - 1) * 100)}
+
+
+def mark_price_checked(ingredient_id: str, store: str) -> dict:
+    """No listing found: keep the price, and don't look again until it is due."""
+    ing, _ = _price_offer(ingredient_id, store)
+    db.mark_checked(ingredient_id, store)
+    return {"ingredient_id": ingredient_id, "name": ing["name"], "store": store,
+            "store_name": STORES[store], "checked": True}
+
+
+def price_check_due(now: datetime | None = None) -> bool:
+    """Whether the every-N-days price check should run now. A check that failed
+    (Claude signed out, no network) is retried a day later, not N days."""
+    days = _prefs().price_refresh_days
+    if days <= 0:
+        return False
+    last = db.get_meta(PRICE_RUN)
+    if not last or not last.get("started_at"):
+        return True
+    now = now or datetime.now(timezone.utc)
+    wait = timedelta(days=1) if last.get("error") else timedelta(days=days)
+    return now - datetime.fromisoformat(last["started_at"]) >= wait
+
+
+def note_price_run(**fields: Any) -> dict:
+    """Record a price check starting (`started=True`) or how it ended."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if fields.pop("started", False):
+        run = {"started_at": now, "finished_at": None, **fields}
+    else:
+        run = {**(db.get_meta(PRICE_RUN) or {}), "finished_at": now, **fields}
+    db.set_meta(PRICE_RUN, run)
+    return run
+
+
+def price_check_status() -> dict:
+    """When prices were last checked online, what it found, and what is due."""
+    prefs = _prefs()
+    last = db.get_meta(PRICE_RUN)
+    next_due = None
+    if prefs.price_refresh_days > 0:
+        if last and last.get("started_at"):
+            wait = 1 if last.get("error") else prefs.price_refresh_days
+            next_due = (datetime.fromisoformat(last["started_at"]) + timedelta(days=wait)).isoformat()
+        else:
+            next_due = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stores = _price_stores()
+    online = sum(1 for ing in _catalog().values() for o in ing["offers"].values()
+                 if o["source"] == "web" and o["store"] in stores)
+    waiting = len(prices_to_check(limit=0, stale_days=max(prefs.price_refresh_days, 1)))
+    return {"last": last, "refresh_days": prefs.price_refresh_days,
+            "items": prefs.price_check_items, "next_due": next_due,
+            "online": online, "waiting": waiting}
 
 
 def get_pantry() -> list[dict]:

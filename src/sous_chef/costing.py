@@ -11,6 +11,7 @@ on the shopping list.
 
 from __future__ import annotations
 
+from sous_chef.config import FIRM_SOURCES
 from sous_chef.units import UnitError, format_amount, to_grams
 
 NUTRIENTS = ("kcal", "protein", "carbs", "fat", "fiber")
@@ -79,7 +80,7 @@ def cost_recipe(recipe: dict, catalog: dict[str, dict], *, servings: int | None 
         if line["cost"] is not None:
             total += line["cost"]
             stores_used.add(store)
-            estimated = estimated or offer["source"] != "user"
+            estimated = estimated or offer["source"] not in FIRM_SOURCES
         for k in NUTRIENTS:
             nutrition[k] += grams / 100 * (ing.get(k) or 0)
 

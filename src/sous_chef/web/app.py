@@ -255,17 +255,46 @@ def api_chef(req: ChefRequest):
 
 
 @app.get("/api/chef/stream")
-def api_chef_stream(plan_id: int | None = None, recent: bool = False):
-    """Reconnect to the plan's chef run after a dropped stream.
+def api_chef_stream(plan_id: int | None = None, recent: bool = False, task: str | None = None):
+    """Reconnect to the plan's chef run (or with task=prices, the price check)
+    after a dropped stream.
 
     Replays it from the start. With `recent`, a run that finished while the
     page was away is replayed too, so it can show what was saved; otherwise
     an idle plan answers with a single `idle` event.
     """
-    job = chef.current_job(plan_id, recent=recent)
+    job = chef.current_job(plan_id, recent=recent, task=task)
     if not job:
         return _sse([{"type": "idle"}])
     return _sse(_follow(job, attached=True))
+
+
+# ── prices online ────────────────────────────────────────────
+
+@app.get("/api/prices")
+def api_price_status():
+    """When prices were last checked online, what changed, and what is due."""
+    status = _call(tools.price_check_status)
+    status["running"] = chef.current_job(None, task="prices") is not None
+    return status
+
+
+class PriceCheck(BaseModel):
+    limit: int | None = None
+
+
+@app.post("/api/prices/check")
+def api_price_check(req: PriceCheck):
+    """Check prices online now, streaming progress — or follow the check
+    already running."""
+    count = req.limit or tools.get_preferences()["price_check_items"]
+    if not 1 <= count <= 40:
+        raise HTTPException(status_code=422, detail="a price check looks up 1–40 prices")
+    try:
+        job, attached = chef.start_or_attach("prices", count=count)
+    except chef.ChefError as e:
+        return _sse([{"type": "error", "text": str(e)}, {"type": "done", "saved": []}])
+    return _sse(_follow(job, attached))
 
 
 # ── recipes ──────────────────────────────────────────────────
@@ -365,8 +394,41 @@ def index():
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+def start_price_schedule(interval: float = 3600.0, first: float = 300.0) -> None:
+    """Check prices online every `price_refresh_days` (Settings), while the server runs.
+
+    Looks hourly whether a check is due — cheap, and an hour is the most a
+    laptop that slept through the due time waits. Started by the server, not
+    at import, so tests and the MCP server never schedule anything.
+    """
+    import logging
+    import threading
+    import time
+
+    log = logging.getLogger("sous_chef.prices")
+
+    def loop() -> None:
+        time.sleep(first)
+        while True:
+            try:
+                if tools.price_check_due() and not chef.current_job(None, task="prices"):
+                    chef.claude_cli_path()
+                    count = tools.get_preferences()["price_check_items"]
+                    chef.start_or_attach("prices", count=count, scheduled=True)
+                    log.info("Checking %d prices online", count)
+            except chef.ChefError:
+                pass                      # no claude CLI here: nothing to run
+            except Exception:
+                log.exception("price schedule")
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="price-schedule").start()
+
+
 def serve(host: str = "127.0.0.1", port: int = 8766, reload: bool = False) -> None:
     import uvicorn
+    if not reload:
+        start_price_schedule()
     uvicorn.run("sous_chef.web.app:app" if reload else app,
                 host=host, port=port, reload=reload, log_level="info")
 
@@ -383,6 +445,7 @@ def serve_sockets(sockets: list, port: int = 8766, await_tailnet: bool = False,
 
     if await_tailnet:
         _watch_for_tailnet(port, log_level)
+    start_price_schedule()
     uvicorn.Server(uvicorn.Config(app, log_level=log_level)).run(sockets=sockets)
 
 

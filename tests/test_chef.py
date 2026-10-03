@@ -75,7 +75,7 @@ def test_a_cli_that_says_nothing_reports_why(fake_cli, monkeypatch):
     events = list(chef.run("suggest", plan_id=1))
     err = next(e for e in events if e["type"] == "error")
     assert "not logged in" in err["text"]
-    assert events[-1] == {"type": "done", "saved": []}
+    assert events[-1]["type"] == "done" and events[-1]["saved"] == []
 
 
 def test_the_mcp_config_is_cleaned_up(fake_cli, tmp_path, monkeypatch):

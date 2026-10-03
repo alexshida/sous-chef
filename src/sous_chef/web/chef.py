@@ -6,11 +6,12 @@ real tools: it searches the actual catalog, sees which ingredients your stores
 carry, and saves recipes through a validated interface that computes their
 cost and nutrition. It never hands back prose for this code to parse.
 
-Three jobs, each one CLI run:
+Four jobs, each one CLI run:
 
   suggest — propose N new recipes for the week
   craft   — write the one recipe you described ("something with miso and salmon")
   import  — convert a recipe you pasted (text, or a link) into the catalog
+  prices  — look up current prices on the stores' own listings (web search)
 
 Progress is streamed to the browser as each tool call happens, and every
 recipe appears the moment propose_recipe saves it.
@@ -84,6 +85,35 @@ Your final message is one or two short lines: the recipes show up as cards on
 their own, with their numbers.
 """
 
+PRICE_PROMPT = """\
+You check grocery prices for sous-chef, a weekly meal planner, using web
+search and the `sous-chef` MCP tools. A wrong price is worse than an old one.
+
+1. Call prices_to_check first. Each item is one ingredient at one store, with
+   the product and package it is listed as now and the current estimate.
+2. For each item, find that store's own current listing for a matching
+   product. Search first: a result from the store's own product page that
+   shows the price and size is a listing — use that page's URL. Read a page
+   only when the result does not show the price. Store sites: Trader Joe's
+   (traderjoes.com), QFC (a Kroger store, qfc.com), Costco (costco.com, whose
+   online prices can run above the warehouse's), PCC Community Markets. A
+   delivery listing for that same store, such as Instacart, is acceptable
+   when the store publishes none. Articles, blogs and other stores are not.
+3. Record it with record_price, exactly as listed: the price, the package
+   that price buys (count, weight or volume as printed), the product name and
+   the listing's URL. Stay close to the current product — organic stays
+   organic, a similar package size.
+4. If you searched and there is no clear, current listing for that store,
+   call mark_price_checked and move on. Never estimate, average, add tax or
+   borrow another store's price.
+5. If searching itself fails (errors, not empty results), stop and say so —
+   don't mark items checked that you could not look up.
+6. Work through the list in order, a few tool calls per item at most.
+
+Your final message is one short line: how many prices changed and how many
+had no listing.
+"""
+
 _DENIED = ["Bash", "Edit", "Write", "Read", "NotebookEdit", "WebSearch", "Task",
            "Skill", "SlashCommand"]
 
@@ -92,6 +122,12 @@ _TOOLS = [
     f"{PREFIX}search_catalog", f"{PREFIX}get_ingredient", f"{PREFIX}add_ingredient",
     f"{PREFIX}check_recipe", f"{PREFIX}propose_recipe",
     f"{PREFIX}list_recipes", f"{PREFIX}get_recipe",
+]
+
+# A price check gets the price tools and the web, and none of the recipe tools.
+_PRICE_TOOLS = [
+    f"{PREFIX}prices_to_check", f"{PREFIX}record_price", f"{PREFIX}mark_price_checked",
+    f"{PREFIX}get_ingredient",
 ]
 
 _EXIT_GRACE = 30
@@ -171,6 +207,9 @@ def build_prompt(task: str, *, plan_id: int | None, count: int = 3, text: str = 
                 f"ingredient (search_catalog{f' with plan_id={plan_id}' if plan_id else ''}), "
                 f"and add_ingredient only where nothing reasonable matches. Rewrite steps "
                 f"only for clarity. Save it with {save}.\n\n<recipe>\n{text[:20000]}\n</recipe>")
+    if task == "prices":
+        return (f"Check current prices: call prices_to_check(limit={count}) and look up "
+                f"each item it returns.")
     raise ChefError(f"Unknown task '{task}'.")
 
 
@@ -178,23 +217,32 @@ def _is_url(text: str) -> bool:
     return text.startswith(("http://", "https://")) and " " not in text and "\n" not in text
 
 
-def build_command(task: str, prompt: str, model: str) -> tuple[list[str], str]:
+def max_turns(task: str, count: int) -> int:
+    # A price check takes a search, a page and a record per item.
+    return min(20 + 5 * count, 220) if task == "prices" else MAX_TURNS
+
+
+def build_command(task: str, prompt: str, model: str, count: int = 3) -> tuple[list[str], str]:
     cfg_path = _mcp_config()
-    allowed = list(_TOOLS)
-    denied = list(_DENIED)
-    if task == "import" and "<recipe>\nhttp" in prompt:
-        allowed.append("WebFetch")        # only an import from a link may read the web
+    if task == "prices":
+        allowed = [*_PRICE_TOOLS, "WebSearch", "WebFetch"]
+        denied = [t for t in _DENIED if t != "WebSearch"]
     else:
-        denied.append("WebFetch")
+        allowed = list(_TOOLS)
+        denied = list(_DENIED)
+        if task == "import" and "<recipe>\nhttp" in prompt:
+            allowed.append("WebFetch")        # only an import from a link may read the web
+        else:
+            denied.append("WebFetch")
     cmd = [
         claude_cli_path(), "-p",
         "--model", model,
-        "--append-system-prompt", SYSTEM_PROMPT,
+        "--append-system-prompt", PRICE_PROMPT if task == "prices" else SYSTEM_PROMPT,
         "--mcp-config", cfg_path,
         "--strict-mcp-config",
         "--allowedTools", ",".join(allowed),
         "--disallowedTools", ",".join(denied),
-        "--max-turns", str(MAX_TURNS),
+        "--max-turns", str(max_turns(task, count)),
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
@@ -208,6 +256,8 @@ class _Run:
     tool_names: dict[str, str] = field(default_factory=dict)   # tool_use id → name
     text: list[str] = field(default_factory=list)
     saved: list[dict] = field(default_factory=list)
+    prices: list[dict] = field(default_factory=list)       # recorded by record_price
+    unlisted: list[dict] = field(default_factory=list)     # mark_price_checked
     fallback: str = ""
 
 
@@ -216,12 +266,22 @@ def run(task: str, *, plan_id: int | None = None, count: int = 3, text: str = ""
     """Run one chef job, yielding events for the browser.
 
     Event types: `status` (what it is doing), `recipe` (one saved: id, title),
-    `retry` (a save was rejected and is being fixed), `text` (its closing words),
-    `error`, and finally `done` with the ids saved.
+    `price` (one updated: name, store, old and new), `unlisted` (no listing
+    found), `retry` (a save was rejected and is being fixed), `text` (its
+    closing words), `error`, and finally `done` with the ids saved and the
+    number of prices updated and unlisted.
     """
     prompt = build_prompt(task, plan_id=plan_id, count=count, text=text)
-    cmd, cfg_path = build_command(task, prompt, model or DEFAULT_MODEL)
-    yield {"type": "status", "text": "Starting the chef…"}
+    if task == "prices":
+        from sous_chef import tools
+        if not tools.prices_to_check(limit=1):
+            yield {"type": "text", "text": "Every estimate was checked in the last day — "
+                                           "nothing to look up yet."}
+            yield {"type": "done", "saved": [], "updated": 0, "unlisted": 0}
+            return
+    cmd, cfg_path = build_command(task, prompt, model or DEFAULT_MODEL, count)
+    yield {"type": "status",
+           "text": "Starting the price check…" if task == "prices" else "Starting the chef…"}
 
     # Run outside the project so this repo's CLAUDE.md is not loaded: the chef
     # should work from tool output, not developer notes.
@@ -235,17 +295,17 @@ def run(task: str, *, plan_id: int | None = None, count: int = 3, text: str = ""
             for event in ingest(line, state):
                 yield event
         _reap(proc)
-        if not state.saved:
+        closing = "".join(state.text).strip() or state.fallback
+        if not (state.saved or state.prices or state.unlisted):
             err = (proc.stderr.read() if proc.stderr else "").strip()
-            closing = "".join(state.text).strip() or state.fallback
+            what = "checking a price" if task == "prices" else "saving a recipe"
             yield {"type": "error",
                    "text": closing or err[:500] or
-                   "The chef finished without saving a recipe. Check `claude -p hello` works."}
-        else:
-            closing = "".join(state.text).strip() or state.fallback
-            if closing:
-                yield {"type": "text", "text": closing}
-        yield {"type": "done", "saved": [r["id"] for r in state.saved]}
+                   f"The chef finished without {what}. Check `claude -p hello` works."}
+        elif closing:
+            yield {"type": "text", "text": closing}
+        yield {"type": "done", "saved": [r["id"] for r in state.saved],
+               "updated": len(state.prices), "unlisted": len(state.unlisted)}
     finally:
         _finish(proc, cfg_path)
 
@@ -291,7 +351,7 @@ def ingest(line: str, state: _Run) -> list[dict]:
             if not (isinstance(b, dict) and b.get("type") == "tool_result"):
                 continue
             name = state.tool_names.get(b.get("tool_use_id", ""), "")
-            if name != "propose_recipe":
+            if name not in ("propose_recipe", "record_price", "mark_price_checked"):
                 continue
             body = _result_text(b.get("content"))
             if b.get("is_error"):
@@ -299,12 +359,20 @@ def ingest(line: str, state: _Run) -> list[dict]:
                 out.append({"type": "retry", "text": first.strip(" -")[:240]})
                 continue
             try:
-                saved = json.loads(body)
+                result = json.loads(body)
             except json.JSONDecodeError:
                 continue
-            if isinstance(saved, dict) and "id" in saved:
-                state.saved.append(saved)
-                out.append({"type": "recipe", "id": saved["id"], "title": saved.get("title", "")})
+            if not isinstance(result, dict):
+                continue
+            if name == "propose_recipe" and "id" in result:
+                state.saved.append(result)
+                out.append({"type": "recipe", "id": result["id"], "title": result.get("title", "")})
+            elif name == "record_price" and "new" in result:
+                state.prices.append(result)
+                out.append({"type": "price", **result})
+            elif name == "mark_price_checked":
+                state.unlisted.append(result)
+                out.append({"type": "unlisted", **result})
         return out
     return out
 
@@ -335,8 +403,14 @@ def describe_tool(name: str, args: dict) -> str | None:
         return f"Writing up {title}"
     if name in ("list_recipes", "get_recipe", "get_ingredient"):
         return "Looking through your library"
+    if name == "prices_to_check":
+        return "Picking which prices to check"
+    if name == "WebSearch":
+        return f"Searching: {args.get('query', '')}"[:120]
     if name == "WebFetch":
-        return "Reading the recipe page"
+        from urllib.parse import urlparse
+        host = urlparse(args.get("url", "")).hostname or "the page"
+        return f"Reading {host.removeprefix('www.')}"
     return None
 
 
@@ -427,18 +501,21 @@ _jobs: dict[str, Job] = {}
 _jobs_lock = threading.Lock()
 
 
-def _key(plan_id: int | None) -> str:
+def _key(plan_id: int | None, task: str | None = None) -> str:
+    if task == "prices":
+        return "prices"           # one price check at a time, whatever the plan
     return f"plan-{plan_id}" if plan_id else "library"
 
 
 def start_or_attach(task: str, *, plan_id: int | None = None, count: int = 3,
-                    text: str = "", model: str | None = None) -> tuple[Job, bool]:
+                    text: str = "", model: str | None = None,
+                    scheduled: bool = False) -> tuple[Job, bool]:
     """The plan's running job if there is one (attached=True), else a new one.
 
     A bad request (no text to craft from, say) raises ChefError here, before
     anything is started.
     """
-    key = _key(plan_id)
+    key = _key(plan_id, task)
     with _jobs_lock:
         job = _jobs.get(key)
         if job and not job.done:
@@ -446,13 +523,16 @@ def start_or_attach(task: str, *, plan_id: int | None = None, count: int = 3,
         build_prompt(task, plan_id=plan_id, count=count, text=text)
         job = Job(key=key, task=task)
         _jobs[key] = job
-    threading.Thread(target=_drive, args=(job, task, plan_id, count, text, model),
+    threading.Thread(target=_drive, args=(job, task, plan_id, count, text, model, scheduled),
                      daemon=True, name=f"chef-{key}").start()
     return job, False
 
 
 def _drive(job: Job, task: str, plan_id: int | None, count: int, text: str,
-           model: str | None) -> None:
+           model: str | None, scheduled: bool = False) -> None:
+    if task == "prices":
+        from sous_chef import tools
+        tools.note_price_run(started=True, scheduled=scheduled, limit=count)
     try:
         for event in run(task, plan_id=plan_id, count=count, text=text, model=model):
             job.add(event)
@@ -463,12 +543,28 @@ def _drive(job: Job, task: str, plan_id: int | None, count: int, text: str,
         job.add({"type": "error", "text": f"{type(e).__name__}: {e}"})
         job.add({"type": "done", "saved": []})
     finally:
+        if task == "prices":
+            _note_prices(job)
         job.finish()
 
 
-def current_job(plan_id: int | None, *, recent: bool = False) -> Job | None:
+def _note_prices(job: Job) -> None:
+    """What the price check found, for the Pantry tab and the next schedule."""
+    from sous_chef import tools
+    try:
+        changes = [{k: e.get(k) for k in ("name", "store_name", "old", "new", "change_pct")}
+                   for e in job.events if e["type"] == "price"]
+        errors = [e["text"] for e in job.events if e["type"] == "error"]
+        tools.note_price_run(updated=len(changes), changes=changes[:60],
+                             unlisted=sum(e["type"] == "unlisted" for e in job.events),
+                             error=errors[-1][:300] if errors else None)
+    except Exception:  # bookkeeping must not stop the job from finishing
+        pass
+
+
+def current_job(plan_id: int | None, *, recent: bool = False, task: str | None = None) -> Job | None:
     """The plan's running job, or with `recent` one that finished lately."""
-    job = _jobs.get(_key(plan_id))
+    job = _jobs.get(_key(plan_id, task))
     if not job:
         return None
     if not job.done:

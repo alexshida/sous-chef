@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator
 
-from sous_chef.config import DB_PATH
+from sous_chef.config import DB_PATH, FIRM_SOURCES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ingredients (
@@ -31,8 +31,10 @@ CREATE TABLE IF NOT EXISTS ingredients (
 
 -- What a store sells an ingredient as. `source` says how much to trust the
 -- price: seed and scaled are starting estimates, claude is the model's guess,
--- user is a price you entered. carried = 0 records "this store doesn't have
--- it" so that reseeding does not put it back.
+-- web was read off a store listing (source_url) by a price check, and user
+-- and receipt are yours — typed in, or read off your own receipt. carried = 0
+-- records "this store doesn't have it" so that reseeding does not put it
+-- back. checked_at is the last online check, whether or not it found a price.
 CREATE TABLE IF NOT EXISTS offers (
     ingredient_id TEXT NOT NULL REFERENCES ingredients(id) ON DELETE CASCADE,
     store TEXT NOT NULL,
@@ -43,6 +45,8 @@ CREATE TABLE IF NOT EXISTS offers (
     source TEXT NOT NULL DEFAULT 'seed',
     carried INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT,
+    source_url TEXT,
+    checked_at TEXT,
     PRIMARY KEY (ingredient_id, store)
 );
 
@@ -107,6 +111,12 @@ CREATE TABLE IF NOT EXISTS grocery_checks (
     PRIMARY KEY (plan_id, ingredient_id)
 );
 
+-- Small facts about the app itself, e.g. when prices were last checked online.
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_offers_store ON offers(store);
 CREATE INDEX IF NOT EXISTS idx_plans_week ON plans(week_start);
 """
@@ -146,6 +156,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     plans = {r[1] for r in conn.execute("PRAGMA table_info(plans)")}
     if "meal_prep" not in plans:
         conn.execute("ALTER TABLE plans ADD COLUMN meal_prep INTEGER NOT NULL DEFAULT 0")
+    offers = {r[1] for r in conn.execute("PRAGMA table_info(offers)")}
+    for col in ("source_url", "checked_at"):
+        if col not in offers:
+            conn.execute(f"ALTER TABLE offers ADD COLUMN {col} TEXT")
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -273,8 +287,52 @@ def upsert_offer(iid: str, store: str, *, price: float, pkg_qty: float, pkg_unit
                ON CONFLICT(ingredient_id, store) DO UPDATE SET
                    product=excluded.product, pkg_qty=excluded.pkg_qty,
                    pkg_unit=excluded.pkg_unit, price=excluded.price,
-                   source=excluded.source, carried=1, updated_at=excluded.updated_at""",
+                   source=excluded.source, carried=1, updated_at=excluded.updated_at,
+                   source_url=NULL""",
             (iid, store, product, pkg_qty, pkg_unit, price, source, _now()))
+
+
+
+def record_web_price(iid: str, store: str, *, price: float, pkg_qty: float, pkg_unit: str,
+                     product: str, source_url: str) -> bool:
+    """Store a price read off a store listing. False if the offer became yours
+    (or not carried) in the meantime — checked in the same statement, so an
+    edit made while a price check is running is never overwritten."""
+    now = _now()
+    firm = ",".join("?" * len(FIRM_SOURCES))
+    with get_conn() as conn:
+        cur = conn.execute(
+            f"""INSERT INTO offers (ingredient_id, store, product, pkg_qty, pkg_unit, price,
+                    source, carried, updated_at, source_url, checked_at)
+                VALUES (?,?,?,?,?,?,'web',1,?,?,?)
+                ON CONFLICT(ingredient_id, store) DO UPDATE SET
+                    product=excluded.product, pkg_qty=excluded.pkg_qty,
+                    pkg_unit=excluded.pkg_unit, price=excluded.price, source='web',
+                    updated_at=excluded.updated_at, source_url=excluded.source_url,
+                    checked_at=excluded.checked_at
+                WHERE offers.source NOT IN ({firm}) AND offers.carried = 1""",
+            (iid, store, product, pkg_qty, pkg_unit, price, now, source_url, now, *FIRM_SOURCES))
+        return cur.rowcount > 0
+
+
+def mark_checked(iid: str, store: str) -> bool:
+    """An online check that found no listing: the price stays, the date moves on."""
+    with get_conn() as conn:
+        return conn.execute("UPDATE offers SET checked_at = ? WHERE ingredient_id = ? AND store = ?",
+                            (_now(), iid, store)).rowcount > 0
+
+
+def get_meta(key: str, default: Any = None) -> Any:
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return json.loads(row[0]) if row else default
+
+
+def set_meta(key: str, value: Any) -> None:
+    with get_conn() as conn:
+        conn.execute("""INSERT INTO meta (key, value) VALUES (?,?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                     (key, json.dumps(value)))
 
 
 def set_carried(iid: str, store: str, carried: bool) -> bool:

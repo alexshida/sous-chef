@@ -136,6 +136,40 @@ def add_ingredient(name: str, aisle: str, kcal: float, protein: float, carbs: fl
                                        perishable, g_per_cup, unit_g, not_duplicate)
 
 
+# ── prices ───────────────────────────────────────────────────
+
+@mcp.tool()
+def prices_to_check(limit: int = 12) -> list[dict]:
+    """The estimated prices most worth looking up, most useful first: each item's
+    ingredient_id, store, the product and package it is listed as, its current
+    estimate (with price per lb) and the units a package can be given in."""
+    return _wrap(tools.prices_to_check)(limit)
+
+
+@mcp.tool()
+def record_price(ingredient_id: str, store: str, price: float, pkg_qty: float, pkg_unit: str,
+                 product: str, source_url: str, large_change: bool = False) -> dict:
+    """Record a price you read on a listing for that store, with the page's URL.
+
+    price is what the listing charges for the package pkg_qty pkg_unit (e.g.
+    3.99 for 32 oz), product the name on the listing. Only for a product that
+    matches the item — never an estimate, an average or another store's price.
+    A price per lb more than 3× away from the current one is sent back as a
+    likely package mix-up: fix pkg_qty/pkg_unit, or confirm with
+    large_change=true if the listing really says that. Prices the user entered
+    are refused; move on.
+    """
+    return _wrap(tools.record_price)(ingredient_id, store, price, pkg_qty, pkg_unit, product,
+                                     source_url, large_change)
+
+
+@mcp.tool()
+def mark_price_checked(ingredient_id: str, store: str) -> dict:
+    """No clear, current listing found for this item at this store: the estimate
+    stays, and it won't be looked up again until the next check is due."""
+    return _wrap(tools.mark_price_checked)(ingredient_id, store)
+
+
 # ── recipes ──────────────────────────────────────────────────
 
 @mcp.tool()

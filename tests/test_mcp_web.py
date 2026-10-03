@@ -32,8 +32,26 @@ def _call(name, args):
 # ── MCP ──────────────────────────────────────────────────────
 
 def test_allowed_chef_tools_match_the_mcp_server():
-    exposed = {t.replace(chef.PREFIX, "") for t in chef._TOOLS}
+    exposed = {t.replace(chef.PREFIX, "") for t in chef._TOOLS + chef._PRICE_TOOLS}
     assert exposed == {t.name for t in _tools()}
+
+
+def test_a_price_check_gets_the_web_and_no_recipe_tools():
+    cmd, cfg = chef.build_command("prices", chef.build_prompt("prices", plan_id=None, count=5),
+                                  "sonnet", 5)
+    allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
+    denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
+    assert {"WebSearch", "WebFetch"} <= set(allowed) and "WebSearch" not in denied
+    assert not any("propose_recipe" in t or "add_ingredient" in t for t in allowed)
+    assert {"Bash", "Read", "Skill"} <= set(denied)
+    assert cmd[cmd.index("--append-system-prompt") + 1] == chef.PRICE_PROMPT
+    os.unlink(cfg)
+
+    cmd, cfg = chef.build_command("suggest", chef.build_prompt("suggest", plan_id=1), "sonnet")
+    os.unlink(cfg)
+    allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert not any(t in allowed for t in ("WebSearch", "WebFetch")) and \
+        not any("record_price" in t for t in allowed)
 
 
 def test_every_tool_is_described_for_the_model():

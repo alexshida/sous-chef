@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
-from sous_chef.config import STORES
+from sous_chef.config import FIRM_SOURCES, STORES
 from sous_chef.costing import choose_offer, package_grams
 from sous_chef.units import UnitError, format_amount, format_grams, format_qty, normalize_unit, to_grams
 
@@ -139,7 +139,7 @@ def build_list(selections: list[tuple[dict, int]], catalog: dict[str, dict], *,
         "pantry": sorted(pantry_items, key=lambda i: i["name"]),
         "unavailable": unavailable,
         "problems": problems,
-        "estimated": any(i["price_source"] != "user" for i in required),
+        "estimated": any(i["price_source"] not in FIRM_SOURCES for i in required),
     }
 
 
