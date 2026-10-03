@@ -64,8 +64,12 @@ def update_preferences(changes: dict) -> dict:
     merged = Preferences.from_dict({**asdict(p), **changes})
     if not merged.stores or any(s not in STORES for s in merged.stores):
         raise ToolError(f"stores must be a non-empty list of {', '.join(STORES)}")
-    if merged.household < 1 or merged.default_servings < 1:
-        raise ToolError("household and default_servings must be at least 1")
+    if merged.household < 1 or merged.default_servings < 1 or merged.prep_servings < 1:
+        raise ToolError("household, default_servings and prep_servings must be at least 1")
+    try:
+        schedule.parse_hhmm(merged.prep_start)
+    except ValueError:
+        raise ToolError("prep_start must look like 13:00")
     try:
         schedule.parse_hhmm(merged.dinner_time)
     except ValueError:
@@ -526,21 +530,31 @@ def _plan_or_raise(plan_id: int | None) -> dict:
 
 
 def new_plan(week_start: str | None = None, n_recipes: int | None = None,
-             stores: list[str] | None = None) -> dict:
+             stores: list[str] | None = None, meal_prep: bool = False) -> dict:
     """Start planning a week. Defaults come from preferences."""
     prefs = _prefs()
     start = _parse_date(week_start) if week_start else schedule.default_week_start()
     stores = stores or prefs.stores
     if any(s not in STORES for s in stores):
         raise ToolError(f"stores must be from {', '.join(STORES)}")
-    pid = db.create_plan(start.isoformat(), int(n_recipes or prefs.n_recipes), stores)
+    pid = db.create_plan(start.isoformat(), int(n_recipes or prefs.n_recipes), stores, meal_prep)
     return get_plan(pid)
 
 
 def update_plan(plan_id: int, week_start: str | None = None, n_recipes: int | None = None,
-                stores: list[str] | None = None) -> dict:
+                stores: list[str] | None = None, meal_prep: bool | None = None) -> dict:
+    """Change a plan's week, size, stores, or meal-prep mode.
+
+    Meal-prep mode cooks the week in one batch session: suggestions favour
+    recipes made for it, servings default to `prep_servings`, everything is
+    cooked on the first free day, and servings past their keeping time go in
+    the freezer instead of being written off. It works with any stores, but
+    bulk packs are the point, so the plan says when Costco is not switched on.
+    """
     _plan_or_raise(plan_id)
     fields: dict[str, Any] = {}
+    if meal_prep is not None:
+        fields["meal_prep"] = bool(meal_prep)
     if week_start:
         fields["week_start"] = _parse_date(week_start).isoformat()
     if n_recipes is not None:
@@ -553,6 +567,14 @@ def update_plan(plan_id: int, week_start: str | None = None, n_recipes: int | No
         fields["stores"] = stores
     db.update_plan(plan_id, **fields)
     return get_plan(plan_id)
+
+
+def _default_servings(plan: dict, prefs: Preferences | None = None) -> int:
+    prefs = prefs or _prefs()
+    return prefs.prep_servings if plan.get("meal_prep") else prefs.default_servings
+
+
+MEAL_PREP_TAGS = {"meal-prep", "freezer-friendly", "sheet-pan", "one-pot"}
 
 
 def _parse_date(s: str) -> date:
@@ -593,7 +615,8 @@ def get_week(plan_id: int | None = None) -> dict:
               "servings": s["servings"], "total_min": recipes[s["recipe_id"]]["total_min"],
               "cook_date": s["cook_date"], "freshness": _freshness(recipes[s["recipe_id"]], cat)}
              for s in sels if s["recipe_id"] in recipes]
-    week = schedule.plan_week(start, events, plan["day_status"], items, prefs)
+    week = schedule.plan_week(start, events, plan["day_status"], items, prefs,
+                              meal_prep=plan["meal_prep"])
     week["calendar_problems"] = problems
     week["calendar_connected"] = bool(prefs.calendar_feeds)
     return week
@@ -650,15 +673,16 @@ def get_plan(plan_id: int | None = None) -> dict:
                          "cook_date_auto": week["auto_assigned"].get(r["id"], False)})
 
     chosen_ids = {s["recipe_id"] for s in sels}
+    serve = _default_servings(plan, prefs)
     candidates = []
     for c in cands:
         r = recipes.get(c["recipe_id"])
         if not r or r["id"] in chosen_ids:
             continue
-        costed = cost_recipe(r, cat, servings=prefs.default_servings, stores=stores, pantry=pantry)
+        costed = cost_recipe(r, cat, servings=serve, stores=stores, pantry=pantry)
         candidates.append({
             **_summary(r, costed, prefs), "origin": c["origin"],
-            "adds_to_bill": grocery.marginal_cost((r, prefs.default_servings), pairs, cat,
+            "adds_to_bill": grocery.marginal_cost((r, serve), pairs, cat,
                                                   stores=stores, pantry=pantry),
             "shares": grocery.shared_perishables(r, pairs, cat),
         })
@@ -682,6 +706,9 @@ def get_plan(plan_id: int | None = None) -> dict:
         },
         "targets": {"protein_g": prefs.protein_g, "fiber_g": prefs.fiber_g, "kcal": prefs.kcal},
         "household": prefs.household,
+        "meal_prep": plan["meal_prep"], "default_servings": serve,
+        # Bulk prep without the bulk store: worth a nudge, never a requirement.
+        "costco_suggested": plan["meal_prep"] and "costco" not in stores,
     }
 
 
@@ -714,12 +741,18 @@ def suggest_from_library(plan_id: int, count: int = 4, replace: bool = True) -> 
     recent = db.recently_cooked(recent_from) - chosen
     pairs = _selected_pairs(plan, _recipes_by_id(chosen))
     chosen_cuisines = [db.get_recipe(i)["cuisine"] for i in chosen if db.get_recipe(i)]
+    prep = plan["meal_prep"]
+    serve = _default_servings(plan, prefs)
 
     scored = []
     for r in db.list_recipes(library_only=True):
         if r["id"] in seen or r["id"] in chosen:
             continue
-        costed = cost_recipe(r, cat, servings=prefs.default_servings, stores=stores, pantry=pantry)
+        # Meal prep wants food that is made in bulk and keeps: recipes written
+        # for it first, then anything that freezes or cooks in one pan or pot.
+        if prep and not MEAL_PREP_TAGS & set(r["tags"]):
+            continue
+        costed = cost_recipe(r, cat, servings=serve, stores=stores, pantry=pantry)
         if costed["unavailable"]:
             continue
         weight = prefs.cuisines.get(r["cuisine"], 1)
@@ -733,7 +766,9 @@ def suggest_from_library(plan_id: int, count: int = 4, replace: bool = True) -> 
         score -= 1.5 * chosen_cuisines.count(r["cuisine"])          # variety
         score += 0.75 * len(grocery.shared_perishables(r, pairs, cat))  # overlap
         score -= costed["cost_per_serving"] / 4
-        if r["total_min"] > prefs.max_weeknight_min:
+        if prep:
+            score += 4.0 if "meal-prep" in r["tags"] else 0
+        elif r["total_min"] > prefs.max_weeknight_min:
             score -= 0.5
         scored.append((score, r["id"]))
     scored.sort(reverse=True)
@@ -770,11 +805,12 @@ def dismiss_candidate(plan_id: int, recipe_id: int) -> dict:
 
 
 def select_recipe(plan_id: int, recipe_id: int, servings: int | None = None) -> dict:
-    """Choose a recipe for the week at `servings` (default from preferences)."""
+    """Choose a recipe for the week at `servings` (default: the preference for
+    the plan's mode — default_servings, or prep_servings in meal-prep mode)."""
     plan = _plan_or_raise(plan_id)
     if not db.get_recipe(recipe_id):
         raise ToolError(f"No recipe {recipe_id}.")
-    servings = int(_prefs().default_servings if servings is None else servings)
+    servings = int(_default_servings(plan) if servings is None else servings)
     if not 1 <= servings <= 24:
         raise ToolError("servings must be between 1 and 24")
     db.select_recipe(plan["id"], recipe_id, servings)
@@ -849,7 +885,17 @@ def plan_context(plan_id: int | None = None) -> dict:
     return {
         "plan_id": plan["id"], "week_start": plan["week_start"],
         "stores": [{"id": s, "name": STORES[s]} for s in plan["stores"]],
-        "household": prefs.household, "default_servings": prefs.default_servings,
+        "household": prefs.household, "default_servings": _default_servings(plan, prefs),
+        "meal_prep": plan["meal_prep"],
+        **({"meal_prep_brief": (
+            f"Meal-prep mode: the week is cooked in one batch session. Write each recipe for "
+            f"{prefs.prep_servings} servings, from food that keeps {prefs.leftover_days} days in "
+            "the fridge and freezes and reheats well (stews, chilis, curries, grain bowls, "
+            "sheet-pan proteins; not crisp or delicate things). Prefer hands-off methods — "
+            "sheet pan, big pot, oven, rice cooker — and bulk-friendly ingredients"
+            + (" from Costco, which is among the stores" if "costco" in plan["stores"] else "")
+            + ". Tag each recipe 'meal-prep', and 'freezer-friendly' when it is.")}
+           if plan["meal_prep"] else {}),
         "recipes_wanted": plan["n_recipes"], "recipes_chosen": len(full["selected"]),
         "targets_per_serving": {"protein_g": prefs.protein_g, "fiber_g": prefs.fiber_g,
                                 "kcal": prefs.kcal},
@@ -873,17 +919,16 @@ def plan_context(plan_id: int | None = None) -> dict:
 def calendar_ics(plan_id: int | None = None) -> str:
     """An .ics file with a cook block for each chosen recipe."""
     plan = _plan_or_raise(plan_id)
-    prefs = _prefs()
     week = get_week(plan["id"])
-    dinner = schedule.parse_hhmm(prefs.dinner_time)
+    starts = {c["recipe_id"]: (d["date"], c["start"]) for d in week["days"] for c in d["cook"]}
     events = []
     for s in db.selections(plan["id"]):
-        when = week["cook_dates"].get(s["recipe_id"])
-        if not when:
+        if s["recipe_id"] not in starts:
             continue
+        when, at = starts[s["recipe_id"]]
         r = get_recipe(s["recipe_id"], servings=s["servings"], plan_id=plan["id"])
-        end = datetime.combine(date.fromisoformat(when), dinner)
-        start = end - timedelta(minutes=r["total_min"])
+        start = datetime.combine(date.fromisoformat(when), schedule.parse_hhmm(at))
+        end = start + timedelta(minutes=r["total_min"])
         lines = "\n".join(f"• {l['amount']} {l['name']}" + (f", {l['prep']}" if l["prep"] else "")
                           + (" (optional)" if l["optional"] else "") for l in r["lines"])
         steps = "\n".join(f"{i}. {st}" for i, st in enumerate(r["steps"], 1))
@@ -891,7 +936,8 @@ def calendar_ics(plan_id: int | None = None) -> str:
                 f" · ${r['cost_per_serving']:.2f}/serving · {r['per_serving']['protein']:.0f} g protein,"
                 f" {r['per_serving']['fiber']:.0f} g fiber per serving\n\nIngredients\n{lines}"
                 f"\n\nSteps\n{steps}")
+        verb = "Meal prep" if plan["meal_prep"] else "Cook"
         events.append({"uid": f"sous-chef-{plan['id']}-{s['recipe_id']}@sous-chef",
-                       "start": start, "end": end, "summary": f"Cook: {r['title']}",
+                       "start": start, "end": end, "summary": f"{verb}: {r['title']}",
                        "description": desc})
     return calendars.cook_events_ics(events, calendar_name="Meal plan")

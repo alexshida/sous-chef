@@ -136,3 +136,37 @@ def test_no_free_night_is_reported():
     w = week([sel(1)], overrides={d: "busy" for d in
                                   [f"2026-10-{n:02d}" for n in range(5, 12)]})
     assert any("No free night" in x for x in w["coverage"]["warnings"])
+
+
+# ── meal-prep mode ───────────────────────────────────────────
+
+def test_meal_prep_cooks_everything_in_one_session():
+    w = schedule.plan_week(MON, [], {}, [sel(1, servings=8, total=40), sel(2, servings=8, total=90),
+                                         sel(3, servings=8, total=30)],
+                           Preferences(prep_start="13:00"), meal_prep=True)
+    assert set(w["cook_dates"].values()) == {"2026-10-05"}
+    cooks = w["days"][0]["cook"]
+    # longest first, back to back from 1 pm
+    assert [(c["recipe_id"], c["start"]) for c in cooks] == [(2, "13:00"), (1, "14:30"), (3, "15:10")]
+
+
+def test_the_prep_day_is_the_first_free_one():
+    w = schedule.plan_week(MON, [], {"2026-10-05": "busy", "2026-10-06": "out"},
+                           [sel(1, servings=8)], Preferences(), meal_prep=True)
+    assert w["cook_dates"][1] == "2026-10-07"
+
+
+def test_frozen_portions_still_count_in_meal_prep():
+    picks = [sel(1, servings=8), sel(2, servings=8)]
+    prep = schedule.plan_week(MON, [], {}, picks, Preferences(), meal_prep=True)["coverage"]
+    plain = schedule.plan_week(MON, [], {}, [dict(p, cook_date="2026-10-05") for p in picks],
+                               Preferences())["coverage"]
+    assert prep["meals_covered"] > plain["meals_covered"]
+    assert prep["frozen_servings"] > 0
+    assert any(w.startswith("Freeze") and "thaw the night before" in w for w in prep["warnings"])
+
+
+def test_meals_from_the_freezer_say_so():
+    w = schedule.plan_week(MON, [], {}, [sel(1, servings=12)], Preferences(lunches=0), meal_prep=True)
+    later = [d["dinner"]["titles"] for d in w["days"][4:] if d["dinner"] and d["dinner"]["covered"]]
+    assert later and all("(from the freezer)" in t[0] for t in later)

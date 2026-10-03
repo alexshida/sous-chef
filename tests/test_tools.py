@@ -294,3 +294,71 @@ def test_merging_keeps_a_copy_visible_if_either_was(plan):
     db.dismiss_candidate(plan["id"], a)
     tools.merge_duplicate_recipes(apply=True)
     assert [c["id"] for c in tools.get_plan(plan["id"])["candidates"]] == [a]
+
+
+# ── meal-prep mode ───────────────────────────────────────────
+
+@pytest.fixture
+def prep_plan(fresh_db):
+    return tools.new_plan(week_start="2026-10-05", meal_prep=True)
+
+
+def test_meal_prep_suggests_costco_until_it_is_on(prep_plan):
+    assert prep_plan["meal_prep"] and prep_plan["costco_suggested"]
+    p = tools.update_plan(prep_plan["id"], stores=["costco", "tj"])
+    assert not p["costco_suggested"]
+    assert not tools.update_plan(prep_plan["id"], meal_prep=False)["costco_suggested"]
+
+
+def test_meal_prep_servings_default_to_a_batch(prep_plan, fresh_db):
+    p = tools.suggest_from_library(prep_plan["id"], 2)
+    assert all(c["servings"] == 8 for c in p["candidates"])
+    p = tools.select_recipe(prep_plan["id"], p["candidates"][0]["id"])
+    assert p["selected"][0]["servings"] == 8
+    normal = tools.new_plan(week_start="2026-10-12")
+    rid = tools.suggest_from_library(normal["id"], 1)["candidates"][0]["id"]
+    assert tools.select_recipe(normal["id"], rid)["selected"][0]["servings"] == 4
+
+
+def test_meal_prep_library_picks_batch_friendly_recipes(prep_plan):
+    p = tools.suggest_from_library(prep_plan["id"], 6)
+    assert p["candidates"]
+    for c in p["candidates"]:
+        assert tools.MEAL_PREP_TAGS & set(c["tags"]), c["title"]
+
+
+def test_the_chef_is_briefed_for_batch_cooking(prep_plan):
+    ctx = tools.plan_context(prep_plan["id"])
+    assert ctx["meal_prep"] and "8 servings" in ctx["meal_prep_brief"]
+    assert "Costco" not in ctx["meal_prep_brief"]
+    tools.update_plan(prep_plan["id"], stores=["costco", "tj"])
+    assert "Costco" in tools.plan_context(prep_plan["id"])["meal_prep_brief"]
+    tools.update_plan(prep_plan["id"], meal_prep=False)
+    assert "meal_prep_brief" not in tools.plan_context(prep_plan["id"])
+
+
+def test_prep_session_calendar_blocks_run_back_to_back(prep_plan):
+    import icalendar
+    for c in tools.suggest_from_library(prep_plan["id"], 3)["candidates"]:
+        tools.select_recipe(prep_plan["id"], c["id"])
+    cal = icalendar.Calendar.from_ical(tools.calendar_ics(prep_plan["id"]))
+    blocks = sorted((e.decoded("DTSTART"), e.decoded("DTEND"), str(e["SUMMARY"]))
+                    for e in cal.walk("VEVENT"))
+    assert len(blocks) == 3 and all(b[2].startswith("Meal prep: ") for b in blocks)
+    assert blocks[0][0].strftime("%H:%M") == "13:00"
+    assert all(a[1] == b[0] for a, b in zip(blocks, blocks[1:]))     # no gaps, no overlaps
+
+
+def test_prep_preferences_are_validated(fresh_db):
+    with pytest.raises(tools.ToolError):
+        tools.update_preferences({"prep_start": "after lunch"})
+    with pytest.raises(tools.ToolError):
+        tools.update_preferences({"prep_servings": 0})
+    assert tools.update_preferences({"prep_servings": 10})["prep_servings"] == 10
+
+
+def test_an_existing_database_gains_the_meal_prep_column(fresh_db):
+    with db.get_conn() as conn:
+        conn.execute("ALTER TABLE plans DROP COLUMN meal_prep")
+    db.init_db()
+    assert tools.new_plan(meal_prep=True)["meal_prep"]

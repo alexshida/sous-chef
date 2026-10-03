@@ -101,11 +101,13 @@ class PlanUpdate(BaseModel):
     week_start: str | None = None
     n_recipes: int | None = None
     stores: list[str] | None = None
+    meal_prep: bool | None = None
 
 
 @app.patch("/api/plan/{plan_id}")
 def api_update_plan(plan_id: int, req: PlanUpdate):
-    return _call(tools.update_plan, plan_id, req.week_start, req.n_recipes, req.stores)
+    return _call(tools.update_plan, plan_id, req.week_start, req.n_recipes, req.stores,
+                 req.meal_prep)
 
 
 class Suggest(BaseModel):

@@ -75,6 +75,8 @@ Writing a recipe:
    used rather than thrown out.
 6. Steps: one action each, with heat levels, times and doneness cues, written
    for someone cooking after work.
+   When plan_context has a meal_prep_brief, follow it: batch recipes for the
+   stated servings that keep, freeze and reheat well.
 7. Save each finished recipe with propose_recipe. If it reports a problem, fix
    exactly that and call it again.
 

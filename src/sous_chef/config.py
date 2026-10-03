@@ -54,6 +54,8 @@ class Preferences:
     dinner_time: str = "19:00"
     lunches: int = 5                      # weekday lunches to cover with leftovers
     leftover_days: int = 4                # how long cooked food keeps in the fridge
+    prep_servings: int = 8                # meal-prep mode: servings per batch recipe
+    prep_start: str = "13:00"             # meal-prep mode: when the prep session starts
     calendar_feeds: list[str] = field(default_factory=list)
     timezone: str = "America/Los_Angeles"
     notes: str = ""                       # anything else the chef should know

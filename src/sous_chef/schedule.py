@@ -11,6 +11,11 @@ Then the chosen recipes are put on cook nights and their servings are walked
 through the week: dinner on the night they are cooked, then the oldest
 leftovers first for lunches and non-cooking dinners. Anything still in the
 fridge past `leftover_days` is flagged to freeze.
+
+Meal-prep mode cooks everything in one session on the first free day, back to
+back from `prep_start`, and treats the freezer as part of the plan: portions
+past their keeping time are frozen and still eaten later in the week, rather
+than written off.
 """
 
 from __future__ import annotations
@@ -128,8 +133,13 @@ def assign_cook_days(recipes: list[dict], days: list[dict], *, max_weeknight_min
 
 
 def simulate(days: list[dict], cooks: dict[str, list[dict]], *, household: int,
-             lunches: int, leftover_days: int) -> dict:
-    """Walk the servings through the week. Mutates each day with its meals."""
+             lunches: int, leftover_days: int, freezer: bool = False) -> dict:
+    """Walk the servings through the week. Mutates each day with its meals.
+
+    With `freezer`, servings that outlast the keeping time are frozen and stay
+    available (eaten thawed, marked "from the freezer"); without it they are
+    flagged and taken out of the count.
+    """
     fridge: list[dict] = []          # {recipe_id, title, cooked_idx, left}
     lunch_days = {d["date"] for d in days
                   if date.fromisoformat(d["date"]).weekday() < 5 and d["status"] != "away"}
@@ -151,19 +161,26 @@ def simulate(days: list[dict], cooks: dict[str, list[dict]], *, household: int,
             p["left"] -= take
             want -= take
             covered += take
-            got.append(p["title"])
+            got.append(p["title"] + (" (from the freezer)" if p.get("frozen") else ""))
         return got
 
     for idx, d in enumerate(days):
-        # Food past its keeping time is taken out of the fridge and flagged.
+        # Food past its keeping time is frozen (meal prep) or flagged and dropped.
         for p in fridge:
-            if p["left"] > 0 and idx - p["cooked_idx"] == leftover_days:
+            if p["left"] > 0 and not p.get("frozen") and idx - p["cooked_idx"] == leftover_days:
                 n = p["left"]
-                warnings.append(f"{n} serving{'s' if n != 1 else ''} of {p['title']} won't be "
-                                f"eaten within {leftover_days} days — freeze "
-                                f"{'them' if n != 1 else 'it'} the night you cook.")
                 frozen += n
-                p["left"] = 0
+                if freezer:
+                    p["frozen"] = True
+                    warnings.append(f"Freeze {n} serving{'s' if n != 1 else ''} of {p['title']} "
+                                    f"on {days[p['cooked_idx']]['dow']} — "
+                                    f"{'they are' if n != 1 else 'it is'} eaten after day "
+                                    f"{leftover_days}; thaw the night before.")
+                else:
+                    warnings.append(f"{n} serving{'s' if n != 1 else ''} of {p['title']} won't be "
+                                    f"eaten within {leftover_days} days — freeze "
+                                    f"{'them' if n != 1 else 'it'} the night you cook.")
+                    p["left"] = 0
 
         d["lunch"] = None
         if d["date"] in lunch_days:
@@ -196,8 +213,16 @@ def simulate(days: list[dict], cooks: dict[str, list[dict]], *, household: int,
             "frozen_servings": frozen, "warnings": warnings, "gaps": gaps}
 
 
+def assign_prep_day(recipes: list[dict], days: list[dict]) -> dict[int, str]:
+    """Meal prep: every recipe without a day goes to the first free day."""
+    free = [d for d in days if d["status"] == "home"]
+    if not free:
+        return {}
+    return {r["recipe_id"]: free[0]["date"] for r in recipes if not r.get("cook_date")}
+
+
 def plan_week(week_start: date, events: list[dict], overrides: dict[str, str],
-              selections: list[dict], prefs) -> dict:
+              selections: list[dict], prefs, *, meal_prep: bool = False) -> dict:
     """The whole week view. `selections` items: recipe_id, title, servings,
     total_min, cook_date (or None), and freshness (how much it wants cooking early)."""
     days = []
@@ -213,32 +238,54 @@ def plan_week(week_start: date, events: list[dict], overrides: dict[str, str],
     in_week = {d["date"] for d in days}
     placed = [dict(s, cook_date=s["cook_date"] if s.get("cook_date") in in_week else None)
               for s in selections]
-    auto = assign_cook_days(placed, days, max_weeknight_min=prefs.max_weeknight_min,
-                            household=prefs.household, lunches=prefs.lunches,
-                            leftover_days=prefs.leftover_days)
-    dinner = parse_hhmm(prefs.dinner_time)
+    if meal_prep:
+        auto = assign_prep_day(placed, days)
+    else:
+        auto = assign_cook_days(placed, days, max_weeknight_min=prefs.max_weeknight_min,
+                                household=prefs.household, lunches=prefs.lunches,
+                                leftover_days=prefs.leftover_days)
     cooks: dict[str, list[dict]] = {}
     for s in placed:
         when = s["cook_date"] or auto.get(s["recipe_id"])
         s["cook_date_effective"] = when
         s["auto_assigned"] = not s["cook_date"] and when is not None
         if when:
-            start = datetime.combine(date.fromisoformat(when), dinner) - timedelta(minutes=s["total_min"])
             cooks.setdefault(when, []).append({
                 "recipe_id": s["recipe_id"], "title": s["title"], "servings": s["servings"],
-                "total_min": s["total_min"], "start": start.strftime("%H:%M"),
-                "auto": s["auto_assigned"]})
+                "total_min": s["total_min"], "auto": s["auto_assigned"]})
+    _set_start_times(cooks, prefs, meal_prep)
     coverage = simulate(days, cooks, household=prefs.household, lunches=prefs.lunches,
-                        leftover_days=prefs.leftover_days)
+                        leftover_days=prefs.leftover_days, freezer=meal_prep)
     coverage["gaps"] = [{"date": days[i]["date"], "dow": days[i]["dow"], "meal": m}
                         for i, m in coverage["gaps"]]
     unplaced = [s["title"] for s in placed if not s["cook_date_effective"]]
     if unplaced:
         coverage["warnings"].append("No free night left for: " + ", ".join(unplaced)
                                     + ". Mark a day as home or pick a cook day.")
-    return {"days": days, "coverage": coverage,
+    return {"days": days, "coverage": coverage, "meal_prep": meal_prep,
             "cook_dates": {s["recipe_id"]: s["cook_date_effective"] for s in placed},
             "auto_assigned": {s["recipe_id"]: s["auto_assigned"] for s in placed}}
+
+
+def _set_start_times(cooks: dict[str, list[dict]], prefs, meal_prep: bool) -> None:
+    """When each cook starts, as HH:MM.
+
+    Normally a recipe is timed to be ready at dinner. A meal-prep session runs
+    its recipes back to back from `prep_start` — longest first, so the slow
+    oven or simmering pot is going while the quick ones are made.
+    """
+    for when, entries in cooks.items():
+        day = date.fromisoformat(when)
+        if meal_prep:
+            entries.sort(key=lambda c: -c["total_min"])
+            t = datetime.combine(day, parse_hhmm(prefs.prep_start))
+            for c in entries:
+                c["start"] = t.strftime("%H:%M")
+                t += timedelta(minutes=c["total_min"])
+        else:
+            dinner = datetime.combine(day, parse_hhmm(prefs.dinner_time))
+            for c in entries:
+                c["start"] = (dinner - timedelta(minutes=c["total_min"])).strftime("%H:%M")
 
 
 def _touches(ev: dict, day: date) -> bool:

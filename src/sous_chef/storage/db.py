@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS plans (
     n_recipes INTEGER NOT NULL,
     stores_json TEXT NOT NULL,
     day_status_json TEXT NOT NULL DEFAULT '{}',
+    meal_prep INTEGER NOT NULL DEFAULT 0,
     created_at TEXT
 );
 
@@ -134,7 +135,15 @@ def init_db() -> None:
     """Create the schema and bring the seeded catalog up to date."""
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         _seed(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Columns added after a database may already exist."""
+    plans = {r[1] for r in conn.execute("PRAGMA table_info(plans)")}
+    if "meal_prep" not in plans:
+        conn.execute("ALTER TABLE plans ADD COLUMN meal_prep INTEGER NOT NULL DEFAULT 0")
 
 
 def _seed(conn: sqlite3.Connection) -> None:
@@ -372,14 +381,16 @@ def _plan(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["stores"] = json.loads(d.pop("stores_json"))
     d["day_status"] = json.loads(d.pop("day_status_json") or "{}")
+    d["meal_prep"] = bool(d.get("meal_prep"))
     return d
 
 
-def create_plan(week_start: str, n_recipes: int, stores: list[str]) -> int:
+def create_plan(week_start: str, n_recipes: int, stores: list[str], meal_prep: bool = False) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO plans (week_start, n_recipes, stores_json, created_at) VALUES (?,?,?,?)",
-            (week_start, n_recipes, json.dumps(stores), _now()))
+            """INSERT INTO plans (week_start, n_recipes, stores_json, meal_prep, created_at)
+               VALUES (?,?,?,?,?)""",
+            (week_start, n_recipes, json.dumps(stores), int(meal_prep), _now()))
         return int(cur.lastrowid)
 
 
@@ -397,11 +408,12 @@ def latest_plan() -> dict | None:
 
 def update_plan(pid: int, **fields: Any) -> None:
     cols = {"week_start": "week_start", "n_recipes": "n_recipes",
-            "stores": "stores_json", "day_status": "day_status_json"}
+            "stores": "stores_json", "day_status": "day_status_json", "meal_prep": "meal_prep"}
     sets, vals = [], []
     for k, v in fields.items():
         sets.append(f"{cols[k]} = ?")
-        vals.append(json.dumps(v) if k in ("stores", "day_status") else v)
+        vals.append(json.dumps(v) if k in ("stores", "day_status")
+                    else int(v) if k == "meal_prep" else v)
     if sets:
         with get_conn() as conn:
             conn.execute(f"UPDATE plans SET {', '.join(sets)} WHERE id = ?", (*vals, pid))
