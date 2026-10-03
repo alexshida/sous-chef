@@ -96,9 +96,11 @@ search and the `sous-chef` MCP tools. A wrong price is worse than an old one.
 1. Call prices_to_check first. Each item is one ingredient at one store, with
    the product and package it is listed as now and the current estimate.
 2. For each item, find that store's own current listing for a matching
-   product. Search first: a result from the store's own product page that
-   shows the price and size is a listing — use that page's URL. Read a page
-   only when the result does not show the price. Store sites: Trader Joe's
+   product. Search first: when the search results give the price and size
+   for a specific page on the store's own site, that is the listing — record
+   it with that page's URL, even if the page itself won't load for you (store
+   sites often block automated reads, or fill prices in with JavaScript).
+   Read a page only when the results don't show the price. Store sites: Trader Joe's
    (traderjoes.com), QFC (a Kroger store, qfc.com), Costco (costco.com, whose
    online prices can run above the warehouse's), PCC Community Markets. A
    delivery listing for that same store, such as Instacart, is acceptable
@@ -106,7 +108,8 @@ search and the `sous-chef` MCP tools. A wrong price is worse than an old one.
 3. Record it with record_price, exactly as listed: the price, the package
    that price buys (count, weight or volume as printed), the product name and
    the listing's URL. Stay close to the current product — organic stays
-   organic, a similar package size.
+   organic, fresh stays fresh (frozen is a different product), a similar
+   package size.
 4. If you searched and there is no clear, current listing for that store,
    call mark_price_checked and move on. Never estimate, average, add tax or
    borrow another store's price.
