@@ -123,7 +123,7 @@ def add_ingredient(name: str, aisle: str, kcal: float, protein: float, carbs: fl
     a twin of an existing ingredient just because the user's stores lack it.
 
     Nutrition is per 100 g. offers: [{store, product, pkg_qty, pkg_unit, price}],
-    store one of tj (Trader Joe's), qfc, pcc — list only stores you are
+    store one of tj (Trader Joe's), qfc, pcc, costco — list only stores you are
     confident sell it, with a realistic price. It is fine if none of them is
     the user's store. g_per_cup lets it be measured by volume; unit_g gives
     grams per counted unit, e.g. {"each": 120} or {"bunch": 60}. aisle:

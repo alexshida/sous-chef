@@ -7,8 +7,10 @@ never overwrites a price you have set.
 
 Trader Joe's offers are written out product by product. QFC and PCC start from
 the same packages scaled by a per-aisle factor ("scaled" in the price table),
-plus the handful of items Trader Joe's does not carry. Correct the ones you buy
-and the rest stop mattering.
+plus the handful of items Trader Joe's does not carry. Costco is written out
+too, but only for what it is worth buying there: the family packs and
+multi-packs that bulk meal prep runs on (2025 warehouse prices, rounded).
+Correct the ones you buy and the rest stop mattering.
 
 Nutrition is per 100 g as eaten or as packaged (drained, for canned beans):
 (kcal, protein, carbs, fat, fiber). Values are USDA-style approximations.
@@ -47,6 +49,9 @@ INGREDIENTS: list[tuple] = [
      {"block": 340}, (321, 21.4, 3.6, 25.0, 0)),
     ("edamame", "Edamame, shelled (frozen)", "frozen", False, 155,
      {}, (121, 11.9, 8.9, 5.2, 5.2)),
+    # Meat only, skin off: a ~3 lb bird yields about 1½ lb of it.
+    ("rotisserie-chicken", "Rotisserie chicken (meat, skin off)", "deli", True, 140,
+     {"each": 680}, (190, 28.0, 0.5, 7.5, 0)),
 
     # ── dairy, dips, refrigerated ──────────────────────────────
     ("greek-yogurt", "Greek yogurt, plain nonfat", "dairy & eggs", True, 245,
@@ -65,6 +70,8 @@ INGREDIENTS: list[tuple] = [
      {}, (430, 5.0, 6.0, 43.0, 1.5)),
     ("kimchi", "Kimchi", "refrigerated", False, 150,
      {}, (15, 1.1, 2.4, 0.5, 1.6)),
+    ("shredded-cheese", "Shredded cheese (cheddar or Mexican blend)", "dairy & eggs", True, 113,
+     {}, (400, 23.0, 2.0, 33.0, 0)),
 
     # ── produce ───────────────────────────────────────────────
     ("onion", "Yellow onion", "produce", False, 160,
@@ -131,6 +138,8 @@ INGREDIENTS: list[tuple] = [
      {"pouch": 283}, (112, 2.3, 23.5, 0.8, 1.8)),
     ("naan", "Naan", "frozen", False, None,
      {"each": 85}, (290, 9.0, 48.0, 6.0, 2.0)),
+    ("corn-frozen", "Corn kernels (frozen)", "frozen", False, 145,
+     {}, (88, 3.0, 20.7, 0.8, 2.1)),
 
     # ── canned & jarred ───────────────────────────────────────
     ("chickpeas", "Chickpeas, canned (drained)", "canned & jarred", False, 164,
@@ -167,6 +176,8 @@ INGREDIENTS: list[tuple] = [
      {"each": 4}, (230, 1.6, 6.0, 23.0, 3.3)),
     ("roasted-red-peppers", "Roasted red peppers, jarred", "canned & jarred", False, 150,
      {}, (21, 0.8, 4.0, 0.3, 1.2)),
+    ("salsa", "Salsa", "canned & jarred", False, 260,
+     {}, (32, 1.5, 6.5, 0.2, 1.8)),
 
     # ── grains, pasta, bread ──────────────────────────────────
     ("jasmine-rice", "Jasmine rice, dry", "grains & pasta", False, 185,
@@ -279,6 +290,7 @@ TRADER_JOES: dict[str, tuple[str, float, str, float]] = {
     "hummus": ("Mediterranean Style Hummus, 16 oz", 16, "oz", 3.99),
     "pesto": ("Genova Pesto, 7 oz", 7, "oz", 3.99),
     "kimchi": ("Kimchi, 10 oz", 10, "oz", 3.49),
+    "shredded-cheese": ("Shredded Mexican Blend Cheese, 12 oz", 12, "oz", 3.99),
     "onion": ("Yellow Onion, each", 1, "each", 0.79),
     "red-onion": ("Red Onion, each", 1, "each", 0.89),
     "garlic": ("Garlic, 3-head bag", 3, "head", 1.99),
@@ -309,6 +321,7 @@ TRADER_JOES: dict[str, tuple[str, float, str, float]] = {
     "spinach-frozen": ("Organic Chopped Spinach, frozen, 16 oz", 16, "oz", 1.99),
     "brown-rice-frozen": ("Organic Brown Rice, frozen, 3 × 10 oz pouches", 3, "pouch", 3.49),
     "naan": ("Garlic Naan, frozen, 4 pieces", 4, "each", 2.99),
+    "corn-frozen": ("Organic Super Sweet Corn, frozen, 16 oz", 16, "oz", 1.99),
     "chickpeas": ("Organic Garbanzo Beans, 15.5 oz can", 1, "can", 1.29),
     "black-beans": ("Organic Black Beans, 15 oz can", 1, "can", 1.29),
     "cannellini": ("Cannellini Beans, 15.5 oz can", 1, "can", 1.29),
@@ -325,6 +338,7 @@ TRADER_JOES: dict[str, tuple[str, float, str, float]] = {
     "veg-broth": ("Organic Low Sodium Vegetable Broth, 32 oz", 1, "carton", 2.49),
     "kalamata-olives": ("Pitted Kalamata Olives, 9.5 oz jar", 9.5, "oz", 3.49),
     "roasted-red-peppers": ("Fire Roasted Red Peppers, 12 oz jar", 12, "oz", 2.49),
+    "salsa": ("Salsa Autentica, 16 oz jar", 16, "oz", 2.99),
     "jasmine-rice": ("Jasmine Rice, 2 lb", 2, "lb", 3.99),
     "basmati-rice": ("Basmati Rice, 2 lb", 2, "lb", 3.99),
     "brown-rice": ("Organic Brown Rice, 2 lb", 2, "lb", 3.49),
@@ -380,6 +394,58 @@ ELSEWHERE: dict[str, dict[str, tuple[str, float, str, float]]] = {
                    "pcc": ("Fish Sauce, 8.5 fl oz", 8.5, "fl oz", 6.49)},
     "jalapeno": {"qfc": ("Jalapeño, each", 1, "each", 0.25),
                  "pcc": ("Jalapeño, each", 1, "each", 0.35)},
+    "rotisserie-chicken": {"qfc": ("Rotisserie Chicken (~2 lb)", 0.7, "each", 8.99),
+                           "pcc": ("Rotisserie Chicken (~2.5 lb)", 0.85, "each", 13.99)},
+}
+
+# Costco: the bulk packs only. Package sizes are what the warehouse sells, so a
+# recipe for 4 buys far more than it uses — which is the point of meal-prep
+# mode, where recipes are written for 8 and the rest goes in the freezer.
+COSTCO: dict[str, tuple[str, float, str, float]] = {
+    "rotisserie-chicken": ("Kirkland Signature Rotisserie Chicken (~3 lb)", 1, "each", 4.99),
+    "chicken-thigh": ("Kirkland Signature Boneless Skinless Chicken Thighs (~6 lb)", 6, "lb", 17.94),
+    "chicken-breast": ("Kirkland Signature Boneless Skinless Chicken Breasts (~6 lb)", 6, "lb", 17.94),
+    "ground-turkey": ("Kirkland Signature Ground Turkey 93/7, 4 × 1 lb", 4, "lb", 10.99),
+    "ground-beef": ("Kirkland Signature Ground Beef 88/12 (~5 lb)", 5, "lb", 24.95),
+    "salmon": ("Kirkland Signature Atlantic Salmon Fillet (~3 lb)", 3, "lb", 32.97),
+    "shrimp": ("Kirkland Signature Raw Shrimp, frozen, 2 lb", 2, "lb", 19.99),
+    "eggs": ("Kirkland Signature Large Eggs, 2 dozen", 24, "each", 7.99),
+    "greek-yogurt": ("Kirkland Signature Nonfat Greek Yogurt, 48 oz", 48, "oz", 6.99),
+    "feta": ("Crumbled Feta, 28 oz", 28, "oz", 9.99),
+    "parmesan": ("Kirkland Signature Parmigiano Reggiano, grated, 1 lb", 1, "lb", 11.99),
+    "shredded-cheese": ("Kirkland Signature Shredded Mexican Blend, 2.5 lb", 2.5, "lb", 10.99),
+    "pesto": ("Kirkland Signature Basil Pesto, 22 oz", 22, "oz", 10.49),
+    "hummus": ("Hummus, 32 oz", 32, "oz", 7.49),
+    "baby-spinach": ("Organic Baby Spinach, 1 lb", 1, "lb", 4.99),
+    "broccoli": ("Organic Broccoli Florets, 2 lb", 2, "lb", 6.49),
+    "bell-pepper": ("Bell Peppers, 6 pack", 6, "each", 7.99),
+    "sweet-potato": ("Sweet Potatoes, 5 lb", 5, "lb", 5.99),
+    "onion": ("Yellow Onions, 10 lb", 10, "lb", 8.99),
+    "garlic": ("Peeled Garlic, 2 lb", 2, "lb", 6.99),
+    "lemon": ("Lemons, 4 lb", 4, "lb", 6.99),
+    "lime": ("Limes, 3 lb", 3, "lb", 4.99),
+    "cucumber": ("Mini Cucumbers, 3 lb", 3, "lb", 5.99),
+    "cherry-tomatoes": ("Cherry Tomatoes, 2 lb", 2, "lb", 6.49),
+    "zucchini": ("Zucchini, 3 lb", 3, "lb", 4.99),
+    "carrots": ("Organic Carrots, 5 lb", 5, "lb", 5.99),
+    "avocado": ("Hass Avocados, 5 count", 5, "each", 6.99),
+    "corn-frozen": ("Kirkland Signature Organic Super Sweet Corn, frozen, 5 lb", 5, "lb", 7.99),
+    "edamame": ("Organic Shelled Edamame, frozen, 4 lb", 4, "lb", 9.99),
+    "salsa": ("Kirkland Signature Organic Salsa, 2 × 38 oz", 76, "oz", 8.99),
+    "jasmine-rice": ("Jasmine Rice, 25 lb", 25, "lb", 21.99),
+    "basmati-rice": ("Basmati Rice, 10 lb", 10, "lb", 16.99),
+    "quinoa": ("Kirkland Signature Organic Quinoa, 4.5 lb", 4.5, "lb", 10.49),
+    "pasta": ("Garofalo Pasta, 6 × 1 lb", 6, "lb", 9.99),
+    "black-beans": ("Kirkland Signature Organic Black Beans, 8 × 15 oz", 8, "can", 8.99),
+    "chickpeas": ("Kirkland Signature Organic Garbanzo Beans, 8 × 15.5 oz", 8, "can", 8.99),
+    "diced-tomatoes": ("Kirkland Signature Organic Diced Tomatoes, 8 × 14.5 oz", 8, "can", 8.99),
+    "chicken-broth": ("Kirkland Signature Organic Chicken Stock, 6 × 32 oz", 6, "carton", 11.99),
+    "veg-broth": ("Kirkland Signature Organic Vegetable Stock, 6 × 32 oz", 6, "carton", 11.99),
+    "coconut-milk": ("Kirkland Signature Organic Coconut Milk, 6 × 13.5 oz", 6, "can", 9.99),
+    "olive-oil": ("Kirkland Signature Extra Virgin Olive Oil, 2 L", 2, "l", 19.99),
+    "soy-sauce": ("Kikkoman Soy Sauce, 64 fl oz", 64, "fl oz", 9.99),
+    "honey": ("Kirkland Signature Organic Honey, 3 lb", 3, "lb", 15.99),
+    "peanut-butter": ("Kirkland Signature Organic Peanut Butter, 2 × 28 oz", 56, "oz", 12.99),
 }
 
 # How QFC and PCC compare to Trader Joe's, aisle by aisle — only used to give
@@ -428,6 +494,9 @@ def offers() -> list[dict]:
         for store, (product, qty, unit, price) in by_store.items():
             rows.append({"ingredient_id": iid, "store": store, "product": product,
                          "pkg_qty": qty, "pkg_unit": unit, "price": price, "source": "seed"})
+    for iid, (product, qty, unit, price) in COSTCO.items():
+        rows.append({"ingredient_id": iid, "store": "costco", "product": product,
+                     "pkg_qty": qty, "pkg_unit": unit, "price": price, "source": "seed"})
     return rows
 
 

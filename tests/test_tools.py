@@ -153,7 +153,7 @@ def test_a_missing_ingredient_can_be_added_then_used(plan):
     (dict(aisle="garage"), "aisle"),
     (dict(protein=80, carbs=40), "exceed"),
     (dict(offers=[]), "offer"),
-    (dict(offers=[{"store": "costco", "pkg_qty": 1, "pkg_unit": "lb", "price": 3}]), "store"),
+    (dict(offers=[{"store": "walmart", "pkg_qty": 1, "pkg_unit": "lb", "price": 3}]), "store"),
 ])
 def test_bad_new_ingredients_are_refused(fresh_db, kwargs, needle):
     args = dict(name="Mystery", aisle="produce", kcal=50, protein=2, carbs=10, fat=1, fiber=2,
@@ -181,7 +181,7 @@ def test_not_carried_moves_the_item_to_the_next_store(plan):
 
 def test_preferences_are_validated(fresh_db):
     with pytest.raises(tools.ToolError):
-        tools.update_preferences({"stores": ["costco"]})
+        tools.update_preferences({"stores": ["walmart"]})
     with pytest.raises(tools.ToolError):
         tools.update_preferences({"dinner_time": "late"})
     with pytest.raises(tools.ToolError):

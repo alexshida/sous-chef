@@ -16,7 +16,7 @@ CONFIG_FILE = SOUS_CHEF_DIR / "config.json"
 DB_PATH = Path(os.environ.get("SOUS_CHEF_DB_PATH", str(SOUS_CHEF_DIR / "sous-chef.db"))).expanduser()
 DEFAULT_MODEL = os.environ.get("SOUS_CHEF_MODEL", "sonnet")
 
-STORES = {"tj": "Trader Joe's", "qfc": "QFC", "pcc": "PCC"}
+STORES = {"tj": "Trader Joe's", "qfc": "QFC", "pcc": "PCC", "costco": "Costco"}
 
 CUISINES = {
     "east_asian": "East Asian",

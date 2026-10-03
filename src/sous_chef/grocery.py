@@ -20,7 +20,7 @@ from sous_chef.costing import choose_offer, package_grams
 from sous_chef.units import UnitError, format_amount, format_grams, format_qty, normalize_unit, to_grams
 
 AISLE_ORDER = [
-    "produce", "meat & seafood", "dairy & eggs", "refrigerated", "frozen", "bakery",
+    "produce", "meat & seafood", "deli", "dairy & eggs", "refrigerated", "frozen", "bakery",
     "grains & pasta", "canned & jarred", "oils & condiments", "baking", "spices",
     "nuts & seeds",
 ]

@@ -84,3 +84,20 @@ def test_scaled_offers_use_generic_names_not_trader_joes_labels():
     for o in seed.offers():
         if o["store"] != "tj":
             assert "Trader Joe" not in o["product"]
+
+
+def test_costco_sells_bulk_packs_not_scaled_guesses(catalog):
+    costco = {iid: ing["offers"]["costco"] for iid, ing in catalog.items() if "costco" in ing["offers"]}
+    assert len(costco) >= 40
+    assert all(o["source"] == "seed" for o in costco.values())
+    # bulk is cheaper per gram than Trader Joe's for the staples meal prep runs on
+    for iid in ("chicken-thigh", "chicken-breast", "quinoa", "black-beans"):
+        ing = catalog[iid]
+        per_g = {s: o["price"] / to_grams(o["pkg_qty"], o["pkg_unit"], ing)
+                 for s, o in ing["offers"].items() if s in ("tj", "costco")}
+        assert per_g["costco"] < per_g["tj"], iid
+
+
+def test_rotisserie_chicken_is_a_costco_staple_not_a_trader_joes_one(catalog):
+    offers = catalog["rotisserie-chicken"]["offers"]
+    assert offers["costco"]["price"] == 4.99 and "tj" not in offers

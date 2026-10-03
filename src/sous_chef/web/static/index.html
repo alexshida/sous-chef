@@ -373,7 +373,7 @@ function renderPlan(){
 
 function renderWeek(p){
   const w = p.week, cov = w.coverage;
-  const stores = (S.prefs?.stores?.length ? S.prefs.stores : ['tj','qfc','pcc']);
+  const stores = (S.prefs?.stores?.length ? S.prefs.stores : Object.keys(p.store_names));
   const allStores = [...stores, ...Object.keys(p.store_names).filter(s => !stores.includes(s))];
   const days = w.days.map(d => {
     const cook = d.cook && d.cook.length;
@@ -801,7 +801,7 @@ function renderCatalog(){
       <div class="hd"><span class="nm" data-action="ing" data-id="${i.id}">${esc(i.name)}
           <span class="tiny muted" style="font-weight:400">${tj ? '· ' + money(tj.price) + ' ' + esc(tj.store_name) : ''} ${open ? '▴' : '▾'}</span></span>
         <label class="switch"><input type="checkbox" data-action="pantry" data-id="${i.id}" ${i.pantry ? 'checked' : ''}> have it</label></div>
-      ${open ? `<div class="offers">${['tj','qfc','pcc'].map(s => {
+      ${open ? `<div class="offers">${Object.keys(S.prefs?.store_names || {}).map(s => {
           const o = i.offers.find(x => x.store === s);
           const name = S.plan?.store_names?.[s] || s;
           if(!o) return `<div class="offer"><b>${esc(name)}</b><span class="muted small">not in the catalog
@@ -905,7 +905,7 @@ async function act(a, el){
     switch(a){
       case 'shift': return setPlan(await api('PATCH', `/api/plan/${p.id}`, {week_start: addDays(p.week_start, +el.dataset.n)}));
       case 'store': {
-        const s = el.dataset.store, order = [...(S.prefs.stores || []), 'tj', 'qfc', 'pcc'];
+        const s = el.dataset.store, order = [...(S.prefs.stores || []), ...Object.keys(p.store_names)];
         let stores = p.stores.includes(s) ? p.stores.filter(x => x !== s) : [...p.stores, s];
         if(!stores.length) return toast('Keep at least one store');
         stores = [...new Set(order)].filter(x => stores.includes(x));
