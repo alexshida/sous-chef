@@ -62,3 +62,24 @@ def test_restart_loads_a_service_that_was_unloaded(mac, monkeypatch):
 def test_dedupe_lists_before_it_merges(fresh_db):
     result = CliRunner().invoke(main.cli, ["dedupe"])
     assert result.exit_code == 0 and "No duplicate recipes" in result.output
+
+
+def test_doctor_reports_and_says_what_to_fix(fresh_db, monkeypatch):
+    from sous_chef.web import chef
+
+    def missing():
+        raise chef.ChefError("not found")
+    monkeypatch.setattr(chef, "claude_cli_path", missing)
+    result = CliRunner().invoke(main.cli, ["doctor", "--port", "1"])
+    assert result.exit_code == 0, result.output            # optional things only warn
+    for name in ("Python", "Data", "Claude", "Server", "Phone access"):
+        assert name in result.output
+    assert "claude.ai/install.sh" in result.output
+
+
+def test_doctor_fails_when_sous_chef_cannot_work(fresh_db, monkeypatch):
+    from sous_chef import doctor
+    monkeypatch.setattr(doctor, "check_data",
+                        lambda: doctor.Check("Data", doctor.FAIL, "read-only", "fix it"))
+    result = CliRunner().invoke(main.cli, ["doctor", "--port", "1"])
+    assert result.exit_code == 1 and "fix it" in result.output

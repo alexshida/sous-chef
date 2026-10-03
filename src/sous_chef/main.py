@@ -1,6 +1,7 @@
 """sous-chef CLI.
 
     sous-chef web                 — the planner at http://localhost:8766 (and your tailnet)
+    sous-chef doctor              — check the setup and say what to fix
     sous-chef install-service     — keep it running in the background (macOS launchd)
     sous-chef restart             — restart that background service, e.g. after a git pull
     sous-chef mcp                 — the MCP server, for attaching to any Claude client
@@ -129,6 +130,22 @@ def install_service(port: int, remove: bool):
     console.print(f"  [dim]logs: {log}[/dim]")
     console.print("  [dim]restart with [cyan]sous-chef restart[/cyan], remove with "
                   "[cyan]sous-chef install-service --remove[/cyan][/dim]")
+
+
+@cli.command()
+@click.option("--port", default=DEFAULT_PORT, show_default=True)
+def doctor(port: int):
+    """Check the setup and say what to do about anything missing."""
+    from sous_chef.doctor import FAIL, OK, run_checks
+
+    marks = {OK: "[green]✓[/green]", "warn": "[yellow]•[/yellow]", FAIL: "[red]✗[/red]"}
+    checks = run_checks(port)
+    for c in checks:
+        console.print(f" {marks[c.status]} [bold]{c.name}[/bold]  {c.found}")
+        if c.status != OK and c.fix:
+            console.print(f"     [dim]{c.fix}[/dim]")
+    if any(c.status == FAIL for c in checks):
+        raise SystemExit(1)
 
 
 @cli.command()
