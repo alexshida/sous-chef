@@ -180,10 +180,19 @@ def _seed(conn: sqlite3.Connection) -> None:
                WHERE offers.source IN ('seed', 'scaled') AND offers.carried = 1""",
             {**o, "now": now})
     # Checked first rather than INSERT OR IGNORE: an ignored insert still
-    # advances AUTOINCREMENT, so every startup would burn sixteen ids.
+    # advances AUTOINCREMENT, so every startup would burn sixteen ids. Starter
+    # recipes already there are refreshed in place — nobody edits them, and a
+    # fix to one should reach databases created before it.
     have = {r[0] for r in conn.execute("SELECT seed_key FROM recipes WHERE seed_key IS NOT NULL")}
     for r in seed_recipes.RECIPES:
         if r["key"] in have:
+            conn.execute(
+                """UPDATE recipes SET title=?, cuisine=?, summary=?, servings=?, active_min=?,
+                       total_min=?, ingredients_json=?, steps_json=?, tags_json=?
+                   WHERE seed_key = ? AND source = 'library'""",
+                (r["title"], r["cuisine"], r["summary"], r["servings"], r["active_min"],
+                 r["total_min"], json.dumps([_line(t) for t in r["ingredients"]]),
+                 json.dumps(r["steps"]), json.dumps(r.get("tags", [])), r["key"]))
             continue
         conn.execute(
             """INSERT INTO recipes (seed_key, title, cuisine, summary, servings,
