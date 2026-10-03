@@ -60,7 +60,8 @@ def awkward_plan(fresh_db):
     lines = [{"id": i, "qty": 0.25, "unit": "cup"} for i in produce]
     base = {"cuisine": "other", "summary": "A deliberately awkward recipe for layout tests.",
             "servings": 4, "active_min": 20, "total_min": 30, "steps": ["Cook."]}
-    plan = tools.new_plan(week_start="2026-10-05")
+    # Meal-prep mode without Costco, so the switch and the Costco nudge are on screen too.
+    plan = tools.new_plan(week_start="2026-10-05", meal_prep=True)
     chosen = tools.propose_recipe({**base, "title": "Every Green Thing Skillet",
                                    "ingredients": lines}, plan["id"], "craft")
     tools.select_recipe(plan["id"], chosen["id"])

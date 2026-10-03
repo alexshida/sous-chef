@@ -111,6 +111,12 @@ label.field input,label.field select,label.field textarea{color:var(--ink)}
 .ag .cook{color:var(--accent);font-weight:600}
 .ag .gap{color:var(--bad)}
 .legend{font-size:.72rem;color:var(--muted)}
+.prep{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-top:.6rem;font-size:.86rem}
+.prep .switch{color:var(--ink);font-size:.9rem;font-weight:600}
+.nudge{margin-top:.55rem;padding:.55rem .7rem;border-radius:10px;background:var(--accent-soft);
+  border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);font-size:.84rem;
+  display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.nudge span{flex:1 1 12rem}
 
 /* bars */
 .bars{display:grid;gap:.45rem;margin-top:.55rem}
@@ -381,12 +387,12 @@ function renderWeek(p){
               role="button" aria-label="${d.dow}: ${STATUS_LABEL[d.status]}. Tap to change.">
       ${d.overridden ? '<span class="pin">•</span>' : ''}
       <span class="dw">${d.dow}</span><span class="dn">${Number(d.date.slice(8))}</span>
-      <span class="st">${cook ? 'Cook' : STATUS_LABEL[d.status]}</span></div>`;
+      <span class="st">${cook ? (w.meal_prep ? 'Prep' : 'Cook') : STATUS_LABEL[d.status]}</span></div>`;
   }).join('');
   const agenda = w.days.map(d => {
     const bits = [];
     d.events.forEach(e => bits.push(`<div class="muted">📅 ${esc(e.time)} · ${esc(e.summary)}</div>`));
-    d.cook.forEach(c => bits.push(`<div class="cook">🍳 Start ${to12(c.start)} · ${esc(c.title)}</div>`));
+    d.cook.forEach(c => bits.push(`<div class="cook">🍳 ${w.meal_prep ? 'Prep' : 'Start'} ${to12(c.start)} · ${esc(c.title)}</div>`));
     const meal = (label, m) => {
       if(m === null || m === undefined) return '';
       if(!m.covered) return `<div class="gap">${label}: nothing planned</div>`;
@@ -413,6 +419,12 @@ function renderWeek(p){
       <span class="small muted">Recipes</span>
       <span class="stepper"><button data-action="n" data-d="-1" aria-label="Fewer recipes">−</button><span>${p.n_recipes}</span><button data-action="n" data-d="1" aria-label="More recipes">+</button></span>
     </div>
+    <div class="prep">
+      <label class="switch"><input type="checkbox" data-action="mealprep" ${p.meal_prep ? 'checked' : ''}> Meal-prep mode</label>
+      <span class="muted small">${p.meal_prep ? `batch recipes for ${p.default_servings}, cooked in one session` : 'cook the week in one batch session'}</span>
+    </div>
+    ${p.costco_suggested ? `<div class="nudge"><span>🛒 Bulk prep goes further with Costco's family packs — chicken by the 6 lb, beans by the 8-pack.</span>
+      <button class="primary small" data-action="add-costco">Shop Costco first</button></div>` : ''}
     <div class="days">${days}</div>
     <div class="legend">Tap a day to mark it free, busy, out for dinner or away${w.calendar_connected ? ' (• = changed from your calendar)' : ' — or connect your calendar in Settings'}.</div>
     ${w.calendar_problems.map(x => `<div class="err small">${esc(x)}</div>`).join('')}
@@ -444,9 +456,10 @@ function renderSummary(p){
     <p class="tiny muted" style="margin-bottom:0">Averages per serving across the week. Per-serving cost is the food you use; the grocery total is whole packages.</p>`;
 }
 
-function recipeMeta(r){
+function recipeMeta(r, {servings = false} = {}){
   const t = r.targets || {};
   return `<div class="meta">
+    ${servings ? `<span><b>${r.servings}</b> servings</span>` : ''}
     <span>⏱ <b>${r.total_min}</b> min${r.active_min && r.active_min !== r.total_min ? ` (${r.active_min} active)` : ''}</span>
     <span><b>${money(r.cost_per_serving)}</b>/serving</span>
     <span><b class="${t.protein ? '' : 'short'}">${g(r.per_serving.protein)} g</b> protein</span>
@@ -506,7 +519,7 @@ function renderCands(p){
       <div class="top"><h3 data-action="view" data-id="${r.id}">${esc(r.title)}</h3>
         <button class="ghost" data-action="dismiss" data-id="${r.id}" aria-label="Not this one">✕</button></div>
       <div class="small muted">${esc(r.summary)}</div>
-      ${recipeMeta(r)}
+      ${recipeMeta(r, {servings: true})}
       ${recipeTags(r, [
         p.selected.length ? `<span class="pill ${r.adds_to_bill < r.total_cost * .8 ? 'good' : ''}">+${money(r.adds_to_bill)} to your list</span>` : '',
         r.shares.length ? `<span class="pill good list">shares ${esc(few(r.shares.map(short)).toLowerCase())}</span>` : ''])}
@@ -862,6 +875,11 @@ function renderSettings(){
       <label class="switch" style="color:var(--ink);font-size:.95rem"><input type="checkbox" name="store:${s}" ${p.stores.includes(s) ? 'checked' : ''}> ${esc(p.store_names[s])}</label>
       <span class="spacer"></span>
       <button type="button" class="ghost" data-action="store-up" data-store="${s}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button></div>`).join('')}</div>
+    <h2 style="margin-top:1.1rem">Meal prep</h2>
+    <div class="grid2">
+      <label class="field">Servings per batch recipe<input type="number" min="1" max="24" name="prep_servings" value="${p.prep_servings}"></label>
+      <label class="field">Prep session starts<input type="time" name="prep_start" value="${p.prep_start}"></label>
+    </div>
     <h2 style="margin-top:1.1rem">For the chef</h2>
     <label class="field">Avoid (allergies, dislikes — comma separated)<input name="avoid" value="${esc(p.avoid.join(', '))}" placeholder="e.g. cilantro, shellfish"></label>
     <label class="field" style="margin-top:.6rem">Equipment<input name="equipment" value="${esc(p.equipment.join(', '))}"></label>
@@ -883,6 +901,7 @@ async function saveSettings(ev){
     household: +f.get('household'), default_servings: +f.get('default_servings'), n_recipes: +f.get('n_recipes'),
     lunches: +f.get('lunches'), dinner_time: f.get('dinner_time'), max_weeknight_min: +f.get('max_weeknight_min'),
     leftover_days: +f.get('leftover_days'), protein_g: +f.get('protein_g'), fiber_g: +f.get('fiber_g'), kcal: +f.get('kcal'),
+    prep_servings: +f.get('prep_servings'), prep_start: f.get('prep_start'),
     cuisines: Object.fromEntries(Object.keys(p.cuisine_names).filter(k => k !== 'other').map(k => [k, +f.get('cuisine:' + k)])),
     stores: order.filter(s => f.get('store:' + s)),
     avoid: String(f.get('avoid')).split(',').map(s => s.trim()).filter(Boolean),
@@ -910,6 +929,11 @@ async function act(a, el){
         if(!stores.length) return toast('Keep at least one store');
         stores = [...new Set(order)].filter(x => stores.includes(x));
         return setPlan(await api('PATCH', `/api/plan/${p.id}`, {stores}));
+      }
+      case 'add-costco': {
+        const stores = ['costco', ...p.stores.filter(s => s !== 'costco')];
+        setPlan(await api('PATCH', `/api/plan/${p.id}`, {stores}));
+        return toast('Costco first — anything it doesn’t carry comes from your other stores');
       }
       case 'n': return setPlan(await api('PATCH', `/api/plan/${p.id}`, {n_recipes: Math.max(1, Math.min(14, p.n_recipes + +el.dataset.d))}));
       case 'day': {
@@ -1001,6 +1025,12 @@ document.addEventListener('click', ev => {
 document.addEventListener('change', async ev => {
   const el = ev.target, a = el.dataset.action;
   try{
+    if(a === 'mealprep'){
+      await api('PATCH', `/api/plan/${S.plan.id}`, {meal_prep: el.checked});
+      // Fresh picks for the mode: batch recipes on, everyday ones off.
+      setPlan(await api('POST', `/api/plan/${S.plan.id}/library`, {count: 4, replace: true}));
+      toast(el.checked ? 'Meal-prep mode on — suggestions are batch recipes now' : 'Meal-prep mode off');
+    }
     if(a === 'cookday') setPlan(await api('POST', `/api/plan/${S.plan.id}/cook-date`, {recipe_id: +el.dataset.id, cook_date: el.value || null}));
     if(a === 'check'){
       el.closest('.item').classList.toggle('checked', el.checked);
