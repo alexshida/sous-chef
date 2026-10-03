@@ -118,10 +118,14 @@ marked **est.** in the app until something better replaces it:
   listings, starting with what your plans use. Each price it finds is marked **online**,
   with the date and a link to the listing. Tap **↻ Check now** on the Pantry tab to run
   one yourself. Settings → Prices sets how often, and how many prices per check.
+- **Your receipts.** After a shop, tap **📷 Scan a receipt** on the Pantry tab and take a
+  photo (or pick one). Claude reads it, matches each line to your ingredients, and those
+  prices become **yours**. Anything it can't match is listed for you. The photo isn't kept.
 - **Your corrections.** Tap an item on the Pantry tab to fix a price or package size.
   It becomes **yours**.
 
-Nothing overwrites a price that's yours: not an online check, not an update. If a
+Nothing overwrites a price that's yours: not an online check, not an update. Only a
+newer receipt does. If a
 store doesn't stock something, untick *carried* for that store, and that sticks too.
 To update in bulk:
 
@@ -138,7 +142,7 @@ marked **Claude est.**
 
 ```bash
 pip install -e ".[dev]"
-pytest                          # ~220 tests, ~30 s
+pytest                          # ~230 tests, ~30 s
 python tools/mobile_check.py    # phone-width layout check (needs Playwright and a running server)
 ```
 

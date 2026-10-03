@@ -18,8 +18,9 @@ the model gets real tools. `web/chef.py` runs `claude -p` with `--strict-mcp-con
 (only our server, not whatever else the user has configured), our MCP tools allowed,
 and shell, file and skill tools denied. It runs from the temp directory so this
 file isn't loaded into the chef's context. WebFetch is allowed only for imports
-from a link and price checks, WebSearch only for price checks, and a price check
-gets the price tools and none of the recipe ones.
+from a link and price checks, WebSearch only for price checks. A price check gets
+the price tools and none of the recipe ones; a receipt gets the catalog and the
+receipt tools, and no web.
 
 **Grams underneath everything.** A recipe line is (ingredient, qty, unit). Each
 ingredient has `g_per_cup` (density) and `unit_g` (grams per clove, can, bunch …).
@@ -90,6 +91,18 @@ back unless `large_change=true`. That is nearly always a package mix-up (a
 multi-pack, a per-lb price). "No listing" keeps the estimate and moves `checked_at`
 on. The last run lives in the `meta` table; `price_check_due` retries a failed run
 after a day, not after `price_refresh_days`.
+
+**A receipt is the user's own evidence.** `record_receipt_price` writes source
+`receipt`, which replaces anything (a typed price included: the receipt is newer)
+and may create an offer, since they bought it there. A web check can't do either.
+Lines rarely print a size, so the package on file is assumed unless the line gives
+one; the same 3× guard catches "4 @ 1.49" recorded as one avocado at $5.96. The
+photo reaches the CLI on **stdin**, as image blocks in a `--input-format
+stream-json` user message. That needs no `Read` permission and no file on disk.
+Write it on its own thread (`chef._feed`): a photo is bigger than a pipe buffer,
+and the CLI writes stdout before it has read all of stdin. The page sends a long
+receipt as overlapping strips at most 1500 px on a side, since Claude downsizes
+images past ~1568 px and a whole receipt shrunk to that is unreadable.
 
 ## Traps
 
