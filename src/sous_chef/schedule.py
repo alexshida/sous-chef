@@ -148,10 +148,18 @@ def simulate(days: list[dict], cooks: dict[str, list[dict]], *, household: int,
     warnings: list[str] = []
     gaps: list[tuple[int, str]] = []
 
+    def order(p: dict, prefer: int | None):
+        if freezer:
+            # One prep session cooks everything at once, so eating oldest-first
+            # would mean one dish for days, then the next. Rotate instead: the
+            # batch with the most left goes first, fridge before freezer.
+            return (p["recipe_id"] != prefer, bool(p.get("frozen")), -p["left"], p["cooked_idx"])
+        return (p["recipe_id"] != prefer, p["cooked_idx"])
+
     def eat(idx: int, prefer: int | None = None) -> list[str]:
         nonlocal covered
         want, got = household, []
-        pool = sorted(fridge, key=lambda p: (p["recipe_id"] != prefer, p["cooked_idx"]))
+        pool = sorted(fridge, key=lambda p: order(p, prefer))
         for p in pool:
             if want == 0:
                 break

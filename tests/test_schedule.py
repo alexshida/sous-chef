@@ -170,3 +170,13 @@ def test_meals_from_the_freezer_say_so():
     w = schedule.plan_week(MON, [], {}, [sel(1, servings=12)], Preferences(lunches=0), meal_prep=True)
     later = [d["dinner"]["titles"] for d in w["days"][4:] if d["dinner"] and d["dinner"]["covered"]]
     assert later and all("(from the freezer)" in t[0] for t in later)
+
+
+
+def test_a_prep_week_rotates_between_batches():
+    w = schedule.plan_week(MON, [], {}, [sel(1, servings=8), sel(2, servings=8)],
+                           Preferences(), meal_prep=True)
+    meals = [m["titles"][0].split(" (")[0] for d in w["days"] for m in (d["lunch"], d["dinner"])
+             if m and m["covered"]]
+    longest = max(len(list(g)) for _, g in __import__("itertools").groupby(meals))
+    assert longest <= 2, meals
