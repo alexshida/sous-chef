@@ -9,7 +9,9 @@ from sous_chef.units import to_grams
 
 # Starter recipes that need something Trader Joe's does not carry. Kept as an
 # explicit list so a catalog change that breaks TJ-only shopping is noticed.
-NOT_TJ_ONLY = {"red-lentil-dal": {"Red lentils, dry"}, "palak-paneer": {"Paneer"}}
+NOT_TJ_ONLY = {"red-lentil-dal": {"Red lentils, dry"}, "palak-paneer": {"Paneer"},
+               "mp-burrito-bowls": {"Rotisserie chicken (meat, skin off)"},
+               "mp-pesto-pasta": {"Rotisserie chicken (meat, skin off)"}}
 
 
 def test_nutrition_is_plausible(catalog):
@@ -101,3 +103,23 @@ def test_costco_sells_bulk_packs_not_scaled_guesses(catalog):
 def test_rotisserie_chicken_is_a_costco_staple_not_a_trader_joes_one(catalog):
     offers = catalog["rotisserie-chicken"]["offers"]
     assert offers["costco"]["price"] == 4.99 and "tj" not in offers
+
+
+
+def test_meal_prep_recipes_are_batches_shoppable_at_costco_and_trader_joes(catalog):
+    prep = [r for r in db.list_recipes() if "meal-prep" in r["tags"]]
+    assert len(prep) >= 10
+    assert {r["cuisine"] for r in prep} >= {"east_asian", "indian", "pasta", "mediterranean"}
+    for r in prep:
+        assert r["servings"] >= 8, r["title"]
+        costco = cost_recipe(r, catalog, stores=["costco", "tj"])
+        assert costco["unavailable"] == [], r["title"]
+        assert "costco" in costco["stores"], r["title"]
+
+
+def test_bulk_buying_makes_meal_prep_cheaper(catalog):
+    from sous_chef import grocery
+    prep = [(r, r["servings"]) for r in db.list_recipes() if "meal-prep" in r["tags"]]
+    with_costco = grocery.build_list(prep, catalog, stores=["costco", "tj"])["used_total"]
+    tj_first = grocery.build_list(prep, catalog, stores=["tj", "costco"])["used_total"]
+    assert with_costco < tj_first * 0.85
