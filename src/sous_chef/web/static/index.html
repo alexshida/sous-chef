@@ -178,6 +178,9 @@ label.field input,label.field select,label.field textarea{color:var(--ink)}
 .offer input.q{width:4.2rem}
 .offer select{padding:.35rem .4rem}
 .src{font-size:.68rem}
+.chg.up{color:var(--bad)}
+.chg.down{color:var(--good)}
+details summary{cursor:pointer;color:var(--accent)}
 
 /* recipe sheet */
 .sheet{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.42);display:flex;align-items:flex-end;justify-content:center}
@@ -253,16 +256,19 @@ nav.tabs button.on{color:var(--accent);font-weight:650}
 
   <!-- ── Pantry & prices ──────────────────────────── -->
   <section class="view" id="v-pantry" hidden>
+    <div class="card" id="price-check"></div>
     <div class="card">
       <h2>Pantry &amp; prices</h2>
       <p class="small muted">Tick what you already have — it stays off the shopping list. Tap an item to
         correct a price or package size; prices you enter are marked <span class="pill good">yours</span>,
-        the rest are estimates (<span class="pill">est.</span>).</p>
+        prices read off a store's listing <span class="pill info">online</span>, and the rest are
+        estimates (<span class="pill">est.</span>).</p>
       <div class="row">
         <input id="pq" type="search" placeholder="Search ingredients" style="flex:1;min-width:0">
         <select id="pfilter" aria-label="Filter">
           <option value="">All</option><option value="pantry">In pantry</option>
-          <option value="est">Estimated prices</option><option value="mine">My prices</option>
+          <option value="est">Estimated prices</option><option value="online">Found online</option>
+          <option value="mine">My prices</option>
         </select>
       </div>
       <div id="plist" style="margin-top:.6rem"></div>
@@ -312,8 +318,23 @@ function sourceLabel(r){
   return ['✨ Fresh from Claude', 'accent'];
 }
 
+// Prices that are yours: typed in, or off your own receipt. The rest are estimates
+// (found online, or a starting guess) until you correct them.
+const FIRM = ['user', 'receipt'];
+const whenShort = iso => iso ? new Date(iso).toLocaleDateString(undefined, {month:'short', day:'numeric'}) : '';
+const safeUrl = u => /^https?:\/\//.test(u || '') ? u : '';
+function priceBadge(o){
+  if(o.source === 'user') return '<span class="pill src good">yours</span>';
+  if(o.source === 'receipt') return '<span class="pill src good">yours · receipt</span>';
+  if(o.source === 'web') return `<span class="pill src info">online · ${esc(whenShort(o.checked_at || o.updated_at))}</span>` +
+    (safeUrl(o.source_url) ? ` <a class="tiny" href="${esc(o.source_url)}" target="_blank" rel="noopener noreferrer">listing ↗</a>` : '');
+  return `<span class="pill src">${o.source === 'claude' ? 'Claude est.' : 'est.'}</span>`;
+}
+const priceNote = src => FIRM.includes(src) ? '' : `<span class="tiny">${src === 'web' ? 'online' : 'est.'}</span>`;
+
 const S = {plan:null, prefs:null, tab:'plan', refreshNudge:null, grocery:null, recipes:null, catalog:null,
-           chef:{busy:false, lines:[], saved:new Set()}, open:{}, sheet:null, cuisine:''};
+           chef:{busy:false, lines:[], saved:new Set()}, open:{}, sheet:null, cuisine:'',
+           pc:{status:null, busy:false, line:'', changes:[], unlisted:0, closing:'', error:''}};
 
 // ── plumbing ───────────────────────────────────────────────
 async function api(method, path, body){
@@ -605,8 +626,9 @@ function chefRefresh(){
   }, 250);
 }
 
-// Read one chef stream. Resolves 'done', 'idle', or 'dropped' (ended early).
-async function followChef(res){
+// Read one server-sent event stream, handing each event to `on`.
+// Resolves 'done', 'idle', or 'dropped' (ended early).
+async function readStream(res, on){
   if(!res.ok || !res.body) return 'dropped';
   const reader = res.body.getReader(), dec = new TextDecoder();
   let buf = '';
@@ -621,21 +643,28 @@ async function followChef(res){
       if(!block.startsWith('data: ')) continue;          // keepalive comments
       const ev = JSON.parse(block.slice(6));
       if(ev.type === 'idle') return 'idle';
-      if(ev.type === 'attached'){
-        // A replay from the start follows, so start the lines over.
-        const asked = S.chef.asked;
-        S.chef = {busy:true, lines:[], saved:new Set(), asked};
-        if(asked && asked !== 'reconnect') chefPush('Still finishing the last request — joined it rather than starting another.');
-        else renderCands(S.plan);
-      }
-      else if(ev.type === 'status') chefPush(esc(ev.text));
-      else if(ev.type === 'recipe'){ S.chef.saved.add(ev.id); chefPush('✓ ' + esc(ev.title), 'done'); chefRefresh(); }
-      else if(ev.type === 'retry') chefPush('Fixing: ' + esc(ev.text));
-      else if(ev.type === 'text') chefPush('<span class="muted">' + esc(ev.text) + '</span>');
-      else if(ev.type === 'error') chefPush(esc(ev.text), 'bad');
-      else if(ev.type === 'done') return 'done';
+      on(ev);
+      if(ev.type === 'done') return 'done';
     }
   }
+}
+
+// Read one chef stream.
+function followChef(res){
+  return readStream(res, ev => {
+    if(ev.type === 'attached'){
+      // A replay from the start follows, so start the lines over.
+      const asked = S.chef.asked;
+      S.chef = {busy:true, lines:[], saved:new Set(), asked};
+      if(asked && asked !== 'reconnect') chefPush('Still finishing the last request — joined it rather than starting another.');
+      else renderCands(S.plan);
+    }
+    else if(ev.type === 'status') chefPush(esc(ev.text));
+    else if(ev.type === 'recipe'){ S.chef.saved.add(ev.id); chefPush('✓ ' + esc(ev.title), 'done'); chefRefresh(); }
+    else if(ev.type === 'retry') chefPush('Fixing: ' + esc(ev.text));
+    else if(ev.type === 'text') chefPush('<span class="muted">' + esc(ev.text) + '</span>');
+    else if(ev.type === 'error') chefPush(esc(ev.text), 'bad');
+  });
 }
 
 async function runChef(body){
@@ -844,7 +873,7 @@ function renderShop(){
           <span><span class="nm">${esc(it.name)}</span>${it.optional ? ' <span class="pill">optional</span>' : ''}
             <span class="sub2" style="display:block">${it.packages > 1 ? it.packages + ' × ' : ''}${esc(it.product)} · need ${esc(it.need)}</span>
             <span class="sub2" style="display:block">${esc(it.uses.map(u => u.recipe).filter((v, i, a) => a.indexOf(v) === i).join(' · '))}</span></span>
-          <span class="pr">${money(it.cost)}${it.price_source !== 'user' ? '<span class="tiny">est.</span>' : ''}</span>
+          <span class="pr">${money(it.cost)}${priceNote(it.price_source)}</span>
         </label>`).join('')).join('')}
     </div>`).join('');
   const left = gl.leftovers.length ? `
@@ -884,6 +913,7 @@ async function loadRecipes(){
 
 // ── pantry & prices ────────────────────────────────────────
 async function loadCatalog(){
+  loadPriceStatus();
   try{ S.catalog = await api('GET', '/api/catalog'); }catch(e){ return fail(e); }
   renderCatalog();
 }
@@ -893,8 +923,9 @@ function renderCatalog(){
   let items = S.catalog || [];
   if(q) items = items.filter(i => q.split(/\s+/).every(w => (i.name + ' ' + i.aisle).toLowerCase().includes(w)));
   if(f === 'pantry') items = items.filter(i => i.pantry);
-  if(f === 'est') items = items.filter(i => i.offers.some(o => o.source !== 'user'));
-  if(f === 'mine') items = items.filter(i => i.offers.some(o => o.source === 'user'));
+  if(f === 'est') items = items.filter(i => i.offers.some(o => !FIRM.includes(o.source)));
+  if(f === 'online') items = items.filter(i => i.offers.some(o => o.source === 'web'));
+  if(f === 'mine') items = items.filter(i => i.offers.some(o => FIRM.includes(o.source)));
   let lastAisle = '';
   $('#plist').innerHTML = items.map(i => {
     const head = i.aisle !== lastAisle ? `<div class="aisle">${esc(i.aisle)}</div>` : '';
@@ -914,9 +945,10 @@ function renderCatalog(){
             $<input inputmode="decimal" value="${o.price}" data-action="price" data-id="${i.id}" data-store="${s}" aria-label="${esc(name)} price" ${o.carried ? '' : 'disabled'}>
             for <input class="q" inputmode="decimal" value="${o.pkg_qty}" data-action="pkgq" data-id="${i.id}" data-store="${s}" aria-label="package size" ${o.carried ? '' : 'disabled'}>
             <select data-action="pkgu" data-id="${i.id}" data-store="${s}" aria-label="package unit" ${o.carried ? '' : 'disabled'}>${[...new Set([o.pkg_unit, ...units.filter(u => i.units.includes(u))])].map(u => `<option ${u === o.pkg_unit ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select>
-            <span class="pill src ${o.source === 'user' ? 'good' : ''}">${o.source === 'user' ? 'yours' : o.source === 'claude' ? 'Claude est.' : 'est.'}</span>
+            ${priceBadge(o)}
             <label class="switch"><input type="checkbox" data-action="carried" data-id="${i.id}" data-store="${s}" ${o.carried ? 'checked' : ''}> carried</label>
-            <span class="tiny muted" style="flex-basis:100%">${esc(o.product)}</span></div></div>`;
+            <span class="tiny muted" style="flex-basis:100%">${esc(o.product)}${o.checked_at && o.source !== 'web' && !FIRM.includes(o.source)
+              ? ` · no listing found online ${esc(whenShort(o.checked_at))}` : ''}</span></div></div>`;
         }).join('')}
         <div class="tiny muted">Per 100 g: ${g(i.per_100g.kcal)} kcal · ${i.per_100g.protein} g protein · ${i.per_100g.fiber} g fiber</div></div>` : ''}
     </div>`;
@@ -934,6 +966,88 @@ async function savePrice(id, store){
   }catch(e){ fail(e); }
 }
 async function refreshPlanQuietly(){ try{ S.plan = await api('GET', `/api/plan/${S.plan.id}`); }catch(e){} }
+
+// ── prices online ──────────────────────────────────────────
+// Claude looks prices up on the stores' own listings, on demand or every N
+// days. Like a recipe run, the check belongs to the Mac: a locked phone
+// reconnects to it rather than starting another.
+async function loadPriceStatus(){
+  try{ S.pc.status = await api('GET', '/api/prices'); }catch(e){ return; }
+  renderPriceCheck();
+  if(S.pc.status.running && !S.pc.busy) followPrices(() => fetch('/api/chef/stream?task=prices'));
+}
+function priceEvent(ev){
+  const pc = S.pc;
+  if(ev.type === 'attached'){ pc.changes = []; pc.unlisted = 0; pc.error = ''; pc.closing = ''; }
+  else if(ev.type === 'status') pc.line = ev.text;
+  else if(ev.type === 'retry') pc.line = 'Double-checking: ' + ev.text;
+  else if(ev.type === 'price') pc.changes.push(ev);
+  else if(ev.type === 'unlisted') pc.unlisted++;
+  else if(ev.type === 'text') pc.closing = ev.text;
+  else if(ev.type === 'error') pc.error = ev.text;
+  renderPriceCheck();
+}
+async function followPrices(start){
+  Object.assign(S.pc, {busy:true, line:'Starting the price check…', changes:[], unlisted:0, closing:'', error:''});
+  renderPriceCheck();
+  let outcome = 'dropped';
+  try{ outcome = await readStream(await start(), priceEvent); }catch(e){}
+  for(let attempt = 0; outcome === 'dropped' && attempt < 60; attempt++){
+    S.pc.line = 'Lost the connection — your Mac is still checking. Reconnecting…'; renderPriceCheck();
+    await pause(3000);
+    try{ outcome = await readStream(await fetch('/api/chef/stream?task=prices&recent=1'), priceEvent); }catch(e){}
+  }
+  S.pc.busy = false;
+  try{ S.pc.status = await api('GET', '/api/prices'); }catch(e){}
+  renderPriceCheck();
+  if(S.pc.changes.length){
+    S.grocery = null; refreshPlanQuietly();
+    if(S.tab === 'pantry'){ try{ S.catalog = await api('GET', '/api/catalog'); renderCatalog(); }catch(e){} }
+  }
+}
+function checkPrices(){
+  if(S.pc.busy) return;
+  followPrices(() => fetch('/api/prices/check', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}));
+}
+const sameOffer = c => c.old.price === c.new.price && c.old.package === c.new.package;
+function changeLine(c){
+  if(sameOffer(c)) return `<div class="ln"><span>${esc(short(c.name))} · ${esc(c.store_name)}: <b>${money(c.new.price)}</b> <span class="muted">unchanged</span></span></div>`;
+  const pct = c.change_pct ? ` <span class="chg ${c.change_pct > 0 ? 'up' : 'down'}">${c.change_pct > 0 ? '+' : ''}${c.change_pct}%</span>` : '';
+  const pkg = c.old.package !== c.new.package ? ` <span class="muted">(${esc(c.old.package)} → ${esc(c.new.package)})</span>` : '';
+  return `<div class="ln"><span>${esc(short(c.name))} · ${esc(c.store_name)}: ${money(c.old.price)} → <b>${money(c.new.price)}</b>${pkg}${pct}</span></div>`;
+}
+function renderPriceCheck(){
+  const el = $('#price-check'); if(!el) return;
+  const pc = S.pc, st = pc.status, last = st?.last, can = S.prefs?.claude_available;
+  let body;
+  if(pc.busy){
+    body = `<div class="chef">${pc.changes.map(changeLine).join('')}
+      ${pc.unlisted ? `<div class="ln muted">${pc.unlisted} with no listing online — estimates kept</div>` : ''}
+      <div class="ln">${esc(pc.line)}</div>
+      <div class="ln muted">working<span class="dots"><i></i><i></i><i></i></span></div></div>`;
+  }else if(pc.error || pc.closing){
+    body = `<div class="chef">${pc.changes.map(changeLine).join('')}
+      ${pc.error ? `<div class="ln bad">${esc(pc.error)}</div>` : `<div class="ln muted">${esc(pc.closing)}</div>`}</div>`;
+  }else if(last?.finished_at){
+    const changes = last.changes || [];
+    body = `<p class="small muted" style="margin:.2rem 0">Last checked ${esc(whenShort(last.started_at))}${last.scheduled ? ' (automatically)' : ''}:
+        ${last.error ? `<span class="chg up">${esc(last.error)}</span>` :
+          `${last.updated || 0} found online (${(last.changes || []).filter(c => !sameOffer(c)).length} changed), ${last.unlisted || 0} with no listing.`}</p>
+      ${changes.length ? `<details class="small"><summary>What changed</summary><div class="chef" style="margin-top:.4rem">${changes.map(changeLine).join('')}</div></details>` : ''}`;
+  }else{
+    body = '<p class="small muted" style="margin:.2rem 0">Not checked online yet.</p>';
+  }
+  const due = st?.next_due && new Date(st.next_due) <= new Date() ? 'today' : whenShort(st?.next_due);
+  const next = st?.refresh_days ? (st.next_due ? `Next automatic check: ${esc(due)} (every ${st.refresh_days} days).` : '')
+    : 'Automatic checks are off (Settings → Prices).';
+  el.innerHTML = `
+    <div class="row"><h2 style="margin:0">Prices online</h2><span class="spacer"></span>
+      ${can ? `<button class="small" data-action="check-prices" ${pc.busy ? 'disabled' : ''}>↻ Check ${st?.items || ''} now</button>` : ''}</div>
+    <p class="small muted" style="margin:.35rem 0 .2rem">Claude looks up current prices on your stores' own listings, the
+      ones that matter most to your plans first. A price you've entered is never changed.
+      ${can ? next : 'This needs Claude on your Mac (see <i>sous-chef doctor</i>).'}</p>
+    ${body}`;
+}
 
 // ── settings ───────────────────────────────────────────────
 function renderSettings(){
@@ -972,6 +1086,12 @@ function renderSettings(){
       <label class="field">From your library<input type="number" min="0" max="8" name="batch_library" value="${p.batch_library}"></label>
       <label class="field">New from Claude<input type="number" min="0" max="6" name="batch_claude" value="${p.batch_claude}"></label>
     </div>
+    <h2 style="margin-top:1.1rem">Prices</h2>
+    <p class="small muted" style="margin-top:0">Claude checks current prices online this often. Prices you enter are never changed.</p>
+    <div class="grid2">
+      <label class="field">Check online every (days, 0 = never)<input type="number" min="0" max="365" name="price_refresh_days" value="${p.price_refresh_days}"></label>
+      <label class="field">Prices looked up per check<input type="number" min="1" max="40" name="price_check_items" value="${p.price_check_items}"></label>
+    </div>
     <h2 style="margin-top:1.1rem">Meal prep</h2>
     <div class="grid2">
       <label class="field">Servings per batch recipe<input type="number" min="1" max="24" name="prep_servings" value="${p.prep_servings}"></label>
@@ -1000,6 +1120,7 @@ async function saveSettings(ev){
     leftover_days: +f.get('leftover_days'), protein_g: +f.get('protein_g'), fiber_g: +f.get('fiber_g'), kcal: +f.get('kcal'),
     prep_servings: +f.get('prep_servings'), prep_start: f.get('prep_start'),
     batch_library: +f.get('batch_library'), batch_claude: +f.get('batch_claude'),
+    price_refresh_days: +f.get('price_refresh_days'), price_check_items: +f.get('price_check_items'),
     cuisines: Object.fromEntries(Object.keys(p.cuisine_names).filter(k => k !== 'other').map(k => [k, +f.get('cuisine:' + k)])),
     stores: order.filter(s => f.get('store:' + s)),
     avoid: String(f.get('avoid')).split(',').map(s => s.trim()).filter(Boolean),
@@ -1105,6 +1226,7 @@ async function act(a, el){
         toast('Staples moved to your pantry'); S.catalog = null; return loadShop();
       }
       case 'cuisine': S.cuisine = el.dataset.c; return loadRecipes();
+      case 'check-prices': return checkPrices();
       case 'ing': S.open['ing-' + el.dataset.id] = !S.open['ing-' + el.dataset.id]; return renderCatalog();
       case 'add-offer': {
         const price = parseFloat(prompt('Price at this store ($)?') || '');

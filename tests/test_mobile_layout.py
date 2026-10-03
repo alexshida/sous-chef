@@ -72,6 +72,11 @@ def awkward_plan(fresh_db):
                                                   {"id": "fish-sauce", "qty": 1, "unit": "tbsp"},
                                                   {"id": "jalapeno", "qty": 2, "unit": "each"}]},
                          plan["id"])
+    # A price check that failed with an unbreakable message, shown on the Pantry tab.
+    tools.note_price_run(started=True, scheduled=True, limit=12)
+    tools.note_price_run(updated=0, unlisted=0, changes=[],
+                         error="Could not reach https://www.traderjoes.com/home/products/pdp/"
+                               "organic-boneless-skinless-chicken-thighs-family-pack-074329")
     return plan
 
 
