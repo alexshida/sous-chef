@@ -56,6 +56,18 @@ required: what Costco does not sell falls through to the next store.
 because they carry much the same range. Costco carries a narrow, bulky one, so
 it has its own offers for the packs worth buying and nothing else.
 
+**Nothing goes into the library by itself, and near-copies ask first.** Claude's
+suggestions and crafts wait for 📚 Save (an import, being the user's own, goes
+straight in unless it clashes). Choosing a recipe for the week does not save it.
+"Same dish" is `similarity.compare`: each ingredient family's share of the
+recipe by weight (thighs ≈ breast, basmati ≈ jasmine, turkey ≈ beef), title
+words, and signature seasonings — gochujang vs teriyaki over the same chicken
+and rice is a different dinner. Claude's own near-copies are refused; a user
+saving one gets Save as new / Replace / Don't save; library picks never put two
+look-alikes in one batch. The thresholds are pinned by a test that no two
+starter recipes look alike, and starter recipes are refreshed in place on
+reseed so a fix reaches existing databases.
+
 **Prices are estimates until they're yours.** Offer `source` is `seed`, `scaled`,
 `claude` or `user`. Reseeding refreshes only `seed`/`scaled` rows that are still
 carried. A user price and a "not carried here" both survive it.

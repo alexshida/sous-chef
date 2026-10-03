@@ -9,9 +9,13 @@ and fiber per serving**. Pick the ones you like, set how many servings you want 
 extras become lunches and lazy-night dinners), and it builds the grocery list for
 the stores you've switched on and puts the cook times on your calendar.
 
-- **Suggestions** come instantly from your recipe library, or from Claude when you
-  want something new ("✨ New ideas"). You can also describe a dish ("something with
-  miso and salmon") or paste in a recipe, or a link to one.
+- **Suggestions** come in a **↻ Fresh batch**: a few from your recipe library at once,
+  plus new ones from Claude streaming in (3 + 3 by default, set in Settings). You can
+  also describe a dish ("something with miso and salmon"), or paste in a recipe or a
+  link to one. Every card says where it came from (📚 your library, ✨ fresh from
+  Claude). Tap 📚 Save to keep a Claude recipe, so future batches can reuse it for
+  free. If it looks like one you already have (same main ingredients under another
+  name), you choose: save as new, replace the old one, or don't save.
 - **The numbers are computed, never guessed.** Claude writes the recipes. Code works
   out what they cost, what they deliver nutritionally, and what goes on the list.
 - **One trip if possible.** Every item goes to the first store you've ticked that
