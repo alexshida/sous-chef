@@ -62,7 +62,7 @@ of Python, apart from ranking the library (see `suggest_from_library`).
 |---|---|
 | `catalog/seed.py` | Ingredients (nutrition per 100 g, grams per cup and per counted unit), Trader Joe's offers, QFC/PCC scaling, default pantry |
 | `catalog/recipes.py` | The starter library, written for 4 servings from catalog ingredients only |
-| `storage/db.py` | All SQLite access; schema and (re)seeding in `init_db()` |
+| `storage/db.py` | All SQLite access; schema, column migrations and (re)seeding in `init_db()` |
 | `units.py` | Amounts → grams, and grams → words ("1½ cups", "2 cloves") |
 | `costing.py` | One recipe at N servings: cost of what is used, nutrition per serving |
 | `grocery.py` | All chosen recipes: summed, rounded to packages, routed to stores |
@@ -70,8 +70,8 @@ of Python, apart from ranking the library (see `suggest_from_library`).
 | `calendars.py` | Private iCal feeds parsed (recurrences expanded); `.ics` written by hand |
 | `tools.py` | The tool layer |
 | `mcp/server.py` | The MCP server |
-| `web/chef.py` | The recipe chef: prompts, the `claude` command line, stream-json → events |
-| `web/app.py` | FastAPI routes, loopback/tailnet-only middleware |
+| `web/chef.py` | The chef: recipe runs and price checks (prompts, the `claude` command line, stream-json → events), one run per plan |
+| `web/app.py` | FastAPI routes, loopback/tailnet-only middleware, the every-N-days price-check schedule |
 | `web/network.py` | Which address to bind (shared with trainer) |
 | `web/static/` | `index.html`, manifest, service worker, icons |
 | `main.py` | CLI: `web`, `doctor`, `install-service`, `restart`, `mcp`, `dedupe`, `prices export/import` |

@@ -18,7 +18,8 @@ the model gets real tools. `web/chef.py` runs `claude -p` with `--strict-mcp-con
 (only our server, not whatever else the user has configured), our MCP tools allowed,
 and shell, file and skill tools denied. It runs from the temp directory so this
 file isn't loaded into the chef's context. WebFetch is allowed only for imports
-from a link.
+from a link and price checks, WebSearch only for price checks, and a price check
+gets the price tools and none of the recipe ones.
 
 **Grams underneath everything.** A recipe line is (ingredient, qty, unit). Each
 ingredient has `g_per_cup` (density) and `unit_g` (grams per clove, can, bunch …).
@@ -69,8 +70,26 @@ starter recipes look alike, and starter recipes are refreshed in place on
 reseed so a fix reaches existing databases.
 
 **Prices are estimates until they're yours.** Offer `source` is `seed`, `scaled`,
-`claude` or `user`. Reseeding refreshes only `seed`/`scaled` rows that are still
-carried. A user price and a "not carried here" both survive it.
+`claude`, `web` (read off a listing, with `source_url`), `user` or `receipt`. The
+last two are yours (`config.FIRM_SOURCES`): costing stops calling them estimates,
+and nothing automatic replaces them. Reseeding refreshes only `seed`/`scaled` rows
+that are still carried. A price check refuses firm and not-carried offers, and the
+refusal is in the UPDATE's `WHERE` as well as the tool, so a price typed while a
+check is running wins. A check never creates an offer: that would be the model
+deciding what a store sells.
+
+**Price checks read listings, not memory.** `chef.run("prices")` is a CLI run with
+web search and three tools: `prices_to_check` (what matters most: this week's and
+recent plans' ingredients, then the library's, staples last, never-checked first),
+`record_price` and `mark_price_checked`. A price must come with the listing's URL.
+A store's product page is often rendered by JavaScript, so a fetched page can hold
+no price at all, while the search result for that same page usually shows it. So a
+search result from the store's own page counts as reading the listing; articles and
+other stores don't. A price per pound more than 3× from the current one is sent
+back unless `large_change=true`. That is nearly always a package mix-up (a
+multi-pack, a per-lb price). "No listing" keeps the estimate and moves `checked_at`
+on. The last run lives in the `meta` table; `price_check_due` retries a failed run
+after a day, not after `price_refresh_days`.
 
 ## Traps
 
@@ -112,6 +131,10 @@ carried. A user price and a "not carried here" both survive it.
 - **`TestClient(app)` needs `client=("127.0.0.1", ...)`.** The middleware refuses
   anything outside loopback and the tailnet, and TestClient's default host is the
   string `"testclient"`.
+- **The price schedule starts with the server, not with the app.** The lifespan
+  runs under every `with TestClient(app)`, so a schedule started there would launch
+  chef runs from the test suite. `serve()`/`serve_sockets()` start it, and its first
+  look is five minutes after startup.
 - **Calendar feeds are fetched on every week view.** Results are cached for 10
   minutes and failures for 2, so a dead feed doesn't cost a timeout per screen.
 - **`.ics` times are floating local time**, so a 6:15 pm cook block stays 6:15 pm

@@ -110,12 +110,20 @@ about 30% less than buying the same food without it (estimated prices).
 
 ## Prices
 
-Trader Joe's and PCC publish no price data. The catalog starts from estimates: Trader
-Joe's priced product by product, QFC and PCC scaled from those by aisle, Costco's bulk
-packs from 2025 warehouse prices. Every
-estimate is marked **est.** in the app. Correct the ones you buy on the Pantry tab and
-they become **yours**, and reseeding never overwrites them. If a store doesn't stock
-something, untick *carried* for that store. To update in bulk:
+The catalog starts from estimates: Trader Joe's priced product by product, QFC and PCC
+scaled from those by aisle, Costco's bulk packs from 2025 warehouse prices. Each is
+marked **est.** in the app until something better replaces it:
+
+- **Online checks.** Every 30 days, Claude looks up current prices on the stores' own
+  listings, starting with what your plans use. Each price it finds is marked **online**,
+  with the date and a link to the listing. Tap **↻ Check now** on the Pantry tab to run
+  one yourself. Settings → Prices sets how often, and how many prices per check.
+- **Your corrections.** Tap an item on the Pantry tab to fix a price or package size.
+  It becomes **yours**.
+
+Nothing overwrites a price that's yours: not an online check, not an update. If a
+store doesn't stock something, untick *carried* for that store, and that sticks too.
+To update in bulk:
 
 ```bash
 sous-chef prices export prices.csv    # edit in Numbers or Excel
@@ -130,7 +138,7 @@ marked **Claude est.**
 
 ```bash
 pip install -e ".[dev]"
-pytest                          # ~130 tests, ~20 s
+pytest                          # ~220 tests, ~30 s
 python tools/mobile_check.py    # phone-width layout check (needs Playwright and a running server)
 ```
 
