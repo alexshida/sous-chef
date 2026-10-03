@@ -31,31 +31,36 @@ subscription pays for suggestions, with no API key and nothing to host.
 ## Install
 
 ```bash
-git clone https://github.com/alexshida/sous-chef && cd sous-chef
-python3 -m venv --prompt sous-chef .venv && source .venv/bin/activate   # prompt shows (sous-chef)
-pip install -e .
+git clone https://github.com/alexshida/sous-chef.git ~/sous-chef && cd ~/sous-chef
+./install.sh
 ```
 
-For Claude suggestions, install [Claude Code](https://claude.com/claude-code) and run
-`claude` once in a terminal to sign in. Everything else works without it.
+Then open **http://localhost:8766**. The installer finds Python 3.10+, sets everything
+up inside the folder, checks the result, and on a Mac offers to keep sous-chef
+running in the background. **New to Terminal?** [docs/INSTALL.md](docs/INSTALL.md)
+walks through every step, plus the optional parts: Claude for ✨ ideas, your iPhone,
+and your calendar.
 
-## Run
+## Everyday commands
 
 ```bash
-sous-chef web              # http://localhost:8766  (trainer uses 8765; both can run)
-sous-chef install-service  # optional: run in the background, start at login
-sous-chef restart          # restart that background service, e.g. after a git pull
+source .venv/bin/activate  # inside the folder: puts `sous-chef` on your PATH, prompt shows (sous-chef)
+sous-chef web              # run it in this terminal: http://localhost:8766 (trainer uses 8765)
+sous-chef doctor           # check the setup and say what to fix
+sous-chef install-service  # run in the background, start at login (macOS)
+sous-chef restart          # restart that background service
 sous-chef dedupe           # list recipes saved more than once; --apply merges them
+git pull && ./install.sh   # update
 ```
 
-### On your iPhone
+## On your iPhone
 
-As with trainer, install Tailscale on the Mac and the phone. `sous-chef web` prints a
+Install Tailscale on the Mac and the phone. `sous-chef doctor` (or `sous-chef web`) prints a
 `100.x.y.z:8766` address for the phone. Open it in **Safari**, then tap Share → **Add to
 Home Screen**. It opens full screen like an app. The shopping list keeps a copy on the
 phone, so it still opens in a store with no signal, and ticks sync when you reconnect.
 
-### Calendar (optional)
+## Calendar (optional)
 
 **Reading your schedule:** Settings → Calendar takes private feed links, one per line:
 
