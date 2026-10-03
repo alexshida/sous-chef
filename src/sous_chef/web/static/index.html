@@ -257,6 +257,7 @@ nav.tabs button.on{color:var(--accent);font-weight:650}
   <!-- ── Pantry & prices ──────────────────────────── -->
   <section class="view" id="v-pantry" hidden>
     <div class="card" id="price-check"></div>
+    <input type="file" id="receipt-in" accept="image/*" multiple hidden>
     <div class="card">
       <h2>Pantry &amp; prices</h2>
       <p class="small muted">Tick what you already have — it stays off the shopping list. Tap an item to
@@ -334,7 +335,8 @@ const priceNote = src => FIRM.includes(src) ? '' : `<span class="tiny">${src ===
 
 const S = {plan:null, prefs:null, tab:'plan', refreshNudge:null, grocery:null, recipes:null, catalog:null,
            chef:{busy:false, lines:[], saved:new Set()}, open:{}, sheet:null, cuisine:'',
-           pc:{status:null, busy:false, line:'', changes:[], unlisted:0, closing:'', error:''}};
+           pc:{status:null, kind:'prices', busy:false, line:'', changes:[], unlisted:0, unmatched:[],
+               closing:'', error:'', note:''}};
 
 // ── plumbing ───────────────────────────────────────────────
 async function api(method, path, body){
@@ -967,35 +969,44 @@ async function savePrice(id, store){
 }
 async function refreshPlanQuietly(){ try{ S.plan = await api('GET', `/api/plan/${S.plan.id}`); }catch(e){} }
 
-// ── prices online ──────────────────────────────────────────
-// Claude looks prices up on the stores' own listings, on demand or every N
-// days. Like a recipe run, the check belongs to the Mac: a locked phone
-// reconnects to it rather than starting another.
+// ── prices: online checks and receipts ─────────────────────
+// Claude looks prices up on the stores' own listings (on demand or every N
+// days) and reads receipts you photograph. Like a recipe run, each belongs
+// to the Mac: a locked phone reconnects rather than starting another.
 async function loadPriceStatus(){
   try{ S.pc.status = await api('GET', '/api/prices'); }catch(e){ return; }
   renderPriceCheck();
-  if(S.pc.status.running && !S.pc.busy) followPrices(() => fetch('/api/chef/stream?task=prices'));
+  if(S.pc.busy) return;
+  if(S.pc.status.receipt_running) followJob('receipt', () => fetch('/api/chef/stream?task=receipt'));
+  else if(S.pc.status.running) followJob('prices', () => fetch('/api/chef/stream?task=prices'));
 }
 function priceEvent(ev){
   const pc = S.pc;
-  if(ev.type === 'attached'){ pc.changes = []; pc.unlisted = 0; pc.error = ''; pc.closing = ''; }
+  if(ev.type === 'attached'){
+    Object.assign(pc, {changes:[], unlisted:0, unmatched:[], error:'', closing:''});
+    if(pc.asked) pc.note = pc.kind === 'receipt'
+      ? 'Still reading the last receipt — send this one again when it’s done.'
+      : 'A price check was already running — following that one.';
+  }
   else if(ev.type === 'status') pc.line = ev.text;
   else if(ev.type === 'retry') pc.line = 'Double-checking: ' + ev.text;
   else if(ev.type === 'price') pc.changes.push(ev);
   else if(ev.type === 'unlisted') pc.unlisted++;
+  else if(ev.type === 'unmatched') pc.unmatched.push(...(ev.lines || []));
   else if(ev.type === 'text') pc.closing = ev.text;
   else if(ev.type === 'error') pc.error = ev.text;
   renderPriceCheck();
 }
-async function followPrices(start){
-  Object.assign(S.pc, {busy:true, line:'Starting the price check…', changes:[], unlisted:0, closing:'', error:''});
+async function followJob(kind, start, asked = false){
+  Object.assign(S.pc, {kind, busy:true, asked, note:'', changes:[], unlisted:0, unmatched:[], closing:'', error:'',
+                       line: kind === 'receipt' ? 'Reading your receipt…' : 'Starting the price check…'});
   renderPriceCheck();
   let outcome = 'dropped';
   try{ outcome = await readStream(await start(), priceEvent); }catch(e){}
   for(let attempt = 0; outcome === 'dropped' && attempt < 60; attempt++){
-    S.pc.line = 'Lost the connection — your Mac is still checking. Reconnecting…'; renderPriceCheck();
+    S.pc.line = 'Lost the connection — your Mac is still on it. Reconnecting…'; renderPriceCheck();
     await pause(3000);
-    try{ outcome = await readStream(await fetch('/api/chef/stream?task=prices&recent=1'), priceEvent); }catch(e){}
+    try{ outcome = await readStream(await fetch(`/api/chef/stream?task=${kind}&recent=1`), priceEvent); }catch(e){}
   }
   S.pc.busy = false;
   try{ S.pc.status = await api('GET', '/api/prices'); }catch(e){}
@@ -1007,45 +1018,100 @@ async function followPrices(start){
 }
 function checkPrices(){
   if(S.pc.busy) return;
-  followPrices(() => fetch('/api/prices/check', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}));
+  followJob('prices', () => fetch('/api/prices/check', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}), true);
 }
-const sameOffer = c => c.old.price === c.new.price && c.old.package === c.new.package;
+
+// A receipt photo as JPEG strips Claude can read: at most 1500 px wide, cut
+// into overlapping 1500 px strips, since Claude shrinks anything much larger
+// and a long receipt shrunk whole is unreadable.
+const STRIP = 1500, OVERLAP = 120, MAX_STRIPS = 8;
+async function receiptStrips(file){
+  const url = URL.createObjectURL(file);
+  try{
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error(`Couldn't open ${file.name || 'that photo'}`));
+      i.src = url;
+    });
+    const W = img.naturalWidth, H = img.naturalHeight;
+    const scale = Math.min(1, STRIP / W, (MAX_STRIPS * (STRIP - OVERLAP) + OVERLAP) / H);
+    const w = Math.round(W * scale), h = Math.round(H * scale), out = [];
+    for(let y = 0; ; y += STRIP - OVERLAP){
+      const sh = Math.min(STRIP, h - y);
+      const c = document.createElement('canvas');
+      c.width = w; c.height = sh;
+      c.getContext('2d').drawImage(img, 0, y / scale, W, sh / scale, 0, 0, w, sh);
+      out.push(c.toDataURL('image/jpeg', 0.85));
+      if(y + sh >= h) break;
+    }
+    return out;
+  }finally{ URL.revokeObjectURL(url); }
+}
+async function scanReceipt(files){
+  if(S.pc.busy || !files.length) return;
+  let images = [];
+  try{
+    for(const f of files) images.push(...await receiptStrips(f));
+  }catch(e){ return toast(e.message); }
+  if(images.length > MAX_STRIPS) return toast('That’s a lot of receipt — send it in two goes.');
+  followJob('receipt', () => fetch('/api/receipt', {method:'POST', headers:{'Content-Type':'application/json'},
+                                                     body: JSON.stringify({images})}), true);
+}
+
+const sameOffer = c => c.old && c.old.price === c.new.price && c.old.package === c.new.package;
 function changeLine(c){
-  if(sameOffer(c)) return `<div class="ln"><span>${esc(short(c.name))} · ${esc(c.store_name)}: <b>${money(c.new.price)}</b> <span class="muted">unchanged</span></span></div>`;
+  const where = `${esc(short(c.name))} · ${esc(c.store_name)}`;
+  if(!c.old) return `<div class="ln"><span>${where}: <b>${money(c.new.price)}</b> <span class="muted">new here</span></span></div>`;
+  if(sameOffer(c)) return `<div class="ln"><span>${where}: <b>${money(c.new.price)}</b> <span class="muted">unchanged</span></span></div>`;
   const pct = c.change_pct ? ` <span class="chg ${c.change_pct > 0 ? 'up' : 'down'}">${c.change_pct > 0 ? '+' : ''}${c.change_pct}%</span>` : '';
   const pkg = c.old.package !== c.new.package ? ` <span class="muted">(${esc(c.old.package)} → ${esc(c.new.package)})</span>` : '';
-  return `<div class="ln"><span>${esc(short(c.name))} · ${esc(c.store_name)}: ${money(c.old.price)} → <b>${money(c.new.price)}</b>${pkg}${pct}</span></div>`;
+  return `<div class="ln"><span>${where}: ${money(c.old.price)} → <b>${money(c.new.price)}</b>${pkg}${pct}</span></div>`;
+}
+const unmatchedLine = lines => lines.length
+  ? `<div class="ln muted"><span>Not in your catalog: ${esc(few(lines, 4))}</span></div>` : '';
+function changesDetails(changes){
+  return changes.length ? `<details class="small"><summary>What changed</summary>
+    <div class="chef" style="margin-top:.4rem">${changes.map(changeLine).join('')}</div></details>` : '';
 }
 function renderPriceCheck(){
   const el = $('#price-check'); if(!el) return;
-  const pc = S.pc, st = pc.status, last = st?.last, can = S.prefs?.claude_available;
-  let body;
-  if(pc.busy){
-    body = `<div class="chef">${pc.changes.map(changeLine).join('')}
+  const pc = S.pc, st = pc.status, last = st?.last, rc = st?.receipt, can = S.prefs?.claude_available;
+  let body = '';
+  if(pc.busy || pc.error || pc.closing){
+    body = `<div class="chef">${pc.note ? `<div class="ln muted">${esc(pc.note)}</div>` : ''}
+      ${pc.changes.map(changeLine).join('')}
       ${pc.unlisted ? `<div class="ln muted">${pc.unlisted} with no listing online — estimates kept</div>` : ''}
-      <div class="ln">${esc(pc.line)}</div>
-      <div class="ln muted">working<span class="dots"><i></i><i></i><i></i></span></div></div>`;
-  }else if(pc.error || pc.closing){
-    body = `<div class="chef">${pc.changes.map(changeLine).join('')}
-      ${pc.error ? `<div class="ln bad">${esc(pc.error)}</div>` : `<div class="ln muted">${esc(pc.closing)}</div>`}</div>`;
-  }else if(last?.finished_at){
-    const changes = last.changes || [];
-    body = `<p class="small muted" style="margin:.2rem 0">Last checked ${esc(whenShort(last.started_at))}${last.scheduled ? ' (automatically)' : ''}:
-        ${last.error ? `<span class="chg up">${esc(last.error)}</span>` :
-          `${last.updated || 0} found online (${(last.changes || []).filter(c => !sameOffer(c)).length} changed), ${last.unlisted || 0} with no listing.`}</p>
-      ${changes.length ? `<details class="small"><summary>What changed</summary><div class="chef" style="margin-top:.4rem">${changes.map(changeLine).join('')}</div></details>` : ''}`;
+      ${unmatchedLine(pc.unmatched)}
+      ${pc.busy ? `<div class="ln">${esc(pc.line)}</div><div class="ln muted">working<span class="dots"><i></i><i></i><i></i></span></div>`
+        : pc.error ? `<div class="ln bad">${esc(pc.error)}</div>` : `<div class="ln muted">${esc(pc.closing)}</div>`}</div>`;
   }else{
-    body = '<p class="small muted" style="margin:.2rem 0">Not checked online yet.</p>';
+    if(last?.finished_at){
+      body += `<p class="small muted" style="margin:.2rem 0">Last checked online ${esc(whenShort(last.started_at))}${last.scheduled ? ' (automatically)' : ''}:
+          ${last.error ? `<span class="chg up">${esc(last.error)}</span>` :
+            `${last.updated || 0} found (${(last.changes || []).filter(c => !sameOffer(c)).length} changed), ${last.unlisted || 0} with no listing.`}</p>
+        ${changesDetails(last.changes || [])}`;
+    }else body += '<p class="small muted" style="margin:.2rem 0">Not checked online yet.</p>';
+    if(rc?.at){
+      body += `<p class="small muted" style="margin:.5rem 0 .2rem">Last receipt${rc.store ? ` (${esc(rc.store)})` : ''}, ${esc(whenShort(rc.at))}:
+          ${rc.error ? `<span class="chg up">${esc(rc.error)}</span>` : `${rc.updated || 0} price${rc.updated === 1 ? '' : 's'} updated${
+            rc.unmatched?.length ? ` · not in your catalog: ${esc(few(rc.unmatched, 4))}` : ''}.`}</p>
+        ${changesDetails(rc.changes || [])}`;
+    }
   }
   const due = st?.next_due && new Date(st.next_due) <= new Date() ? 'today' : whenShort(st?.next_due);
   const next = st?.refresh_days ? (st.next_due ? `Next automatic check: ${esc(due)} (every ${st.refresh_days} days).` : '')
     : 'Automatic checks are off (Settings → Prices).';
   el.innerHTML = `
-    <div class="row"><h2 style="margin:0">Prices online</h2><span class="spacer"></span>
-      ${can ? `<button class="small" data-action="check-prices" ${pc.busy ? 'disabled' : ''}>↻ Check ${st?.items || ''} now</button>` : ''}</div>
-    <p class="small muted" style="margin:.35rem 0 .2rem">Claude looks up current prices on your stores' own listings, the
-      ones that matter most to your plans first. A price you've entered is never changed.
-      ${can ? next : 'This needs Claude on your Mac (see <i>sous-chef doctor</i>).'}</p>
+    <h2 style="margin:0">Prices</h2>
+    <p class="small muted" style="margin:.35rem 0 .5rem">${can
+      ? `Claude keeps them current two ways: it looks them up on your stores' own listings, the ones your
+         plans use first, and it reads your receipts — snap one after a shop and its prices become yours.
+         A price that's yours is never changed by an online check. ${next}`
+      : 'Online price checks and receipt scanning need Claude on your Mac (see <i>sous-chef doctor</i>).'}</p>
+    ${can ? `<div class="row" style="gap:.5rem;flex-wrap:wrap">
+      <button class="small" data-action="scan-receipt" ${pc.busy ? 'disabled' : ''}>📷 Scan a receipt</button>
+      <button class="small ghost" data-action="check-prices" ${pc.busy ? 'disabled' : ''}>↻ Check ${st?.items || ''} online</button></div>` : ''}
     ${body}`;
 }
 
@@ -1227,6 +1293,7 @@ async function act(a, el){
       }
       case 'cuisine': S.cuisine = el.dataset.c; return loadRecipes();
       case 'check-prices': return checkPrices();
+      case 'scan-receipt': return $('#receipt-in').click();
       case 'ing': S.open['ing-' + el.dataset.id] = !S.open['ing-' + el.dataset.id]; return renderCatalog();
       case 'add-offer': {
         const price = parseFloat(prompt('Price at this store ($)?') || '');
@@ -1295,6 +1362,7 @@ $('#prefs-form').addEventListener('submit', saveSettings);
 let rqTimer; $('#rq').addEventListener('input', () => { clearTimeout(rqTimer); rqTimer = setTimeout(loadRecipes, 200); });
 $('#pq').addEventListener('input', () => renderCatalog());
 $('#pfilter').addEventListener('change', () => renderCatalog());
+$('#receipt-in').addEventListener('change', ev => { const files = [...ev.target.files]; ev.target.value = ''; scanReceipt(files); });
 
 // ── boot ───────────────────────────────────────────────────
 if('serviceWorker' in navigator && window.isSecureContext){
