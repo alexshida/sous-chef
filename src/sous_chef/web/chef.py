@@ -6,12 +6,16 @@ real tools: it searches the actual catalog, sees which ingredients your stores
 carry, and saves recipes through a validated interface that computes their
 cost and nutrition. It never hands back prose for this code to parse.
 
-Four jobs, each one CLI run:
+Five jobs, each one CLI run:
 
   suggest — propose N new recipes for the week
   craft   — write the one recipe you described ("something with miso and salmon")
   import  — convert a recipe you pasted (text, or a link) into the catalog
   prices  — look up current prices on the stores' own listings (web search)
+  receipt — read a photo of your receipt and make its prices yours
+
+A receipt's photo goes to the CLI on stdin as an image in a stream-json user
+message, so the model sees it without being given any file access.
 
 Progress is streamed to the browser as each tool call happens, and every
 recipe appears the moment propose_recipe saves it.
@@ -114,6 +118,32 @@ Your final message is one short line: how many prices changed and how many
 had no listing.
 """
 
+RECEIPT_PROMPT = """\
+You read grocery receipts for sous-chef, a weekly meal planner, and update the
+user's prices from them with the `sous-chef` MCP tools.
+
+1. Work out which store the receipt is from: tj (Trader Joe's), qfc (QFC),
+   pcc (PCC Community Markets) or costco (Costco). If it is another store, or
+   the image is not a receipt, say so in one line and stop.
+2. Go through the item lines. Skip what isn't food or isn't an item: bags,
+   deposits, tax, totals, payments. Expand the abbreviations ("ORG BNLS SKNLS
+   CHKN THGH") and find the catalog ingredient with search_catalog — the same
+   food, not a stand-in (fresh basil is not dried basil). Search broadly and
+   several lines at a time ("chicken", "yogurt").
+3. record_receipt_price for each match, with the price printed on the item's
+   own line — a separate coupon or savings line is ignored, since it won't
+   last. For "2 @ 1.09" the price is 1.09. For an item sold by weight
+   ("1.32 lb @ 2.49/lb") it is 2.49 with pkg_qty=1, pkg_unit="lb". Give
+   pkg_qty and pkg_unit when the line prints a size ("JASMINE RICE 2LB");
+   otherwise leave them out and the package on file is used.
+4. Finish with receipt_unmatched, listing the food lines (as printed) that
+   match nothing in the catalog, then one short line: how many prices you
+   updated.
+
+Never invent a line or a price that is not on the receipt. A line you cannot
+read is left out.
+"""
+
 _DENIED = ["Bash", "Edit", "Write", "Read", "NotebookEdit", "WebSearch", "Task",
            "Skill", "SlashCommand"]
 
@@ -129,6 +159,14 @@ _PRICE_TOOLS = [
     f"{PREFIX}prices_to_check", f"{PREFIX}record_price", f"{PREFIX}mark_price_checked",
     f"{PREFIX}get_ingredient",
 ]
+
+# A receipt gets the catalog to match against and the receipt tools — no web.
+_RECEIPT_TOOLS = [
+    f"{PREFIX}search_catalog", f"{PREFIX}get_ingredient",
+    f"{PREFIX}record_receipt_price", f"{PREFIX}receipt_unmatched",
+]
+
+IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 _EXIT_GRACE = 30
 MAX_TURNS = 60
@@ -210,6 +248,11 @@ def build_prompt(task: str, *, plan_id: int | None, count: int = 3, text: str = 
     if task == "prices":
         return (f"Check current prices: call prices_to_check(limit={count}) and look up "
                 f"each item it returns.")
+    if task == "receipt":
+        extra = f"\nThe user adds: «{text}»" if text else ""
+        return ("Here is a photo of the user's grocery receipt, in one or more parts from top "
+                "to bottom (parts may overlap — don't count a line twice). Update their prices "
+                f"from it.{extra}")
     raise ChefError(f"Unknown task '{task}'.")
 
 
@@ -219,14 +262,24 @@ def _is_url(text: str) -> bool:
 
 def max_turns(task: str, count: int) -> int:
     # A price check takes a search, a page and a record per item.
-    return min(20 + 5 * count, 220) if task == "prices" else MAX_TURNS
+    if task == "prices":
+        return min(20 + 5 * count, 220)
+    return 120 if task == "receipt" else MAX_TURNS
+
+
+_PROMPTS = {"prices": PRICE_PROMPT, "receipt": RECEIPT_PROMPT}
 
 
 def build_command(task: str, prompt: str, model: str, count: int = 3) -> tuple[list[str], str]:
+    """The CLI command line. A receipt's prompt (and photo) go on stdin instead
+    of as an argument — see `user_message`."""
     cfg_path = _mcp_config()
     if task == "prices":
         allowed = [*_PRICE_TOOLS, "WebSearch", "WebFetch"]
         denied = [t for t in _DENIED if t != "WebSearch"]
+    elif task == "receipt":
+        allowed = list(_RECEIPT_TOOLS)
+        denied = [*_DENIED, "WebFetch"]
     else:
         allowed = list(_TOOLS)
         denied = list(_DENIED)
@@ -237,7 +290,7 @@ def build_command(task: str, prompt: str, model: str, count: int = 3) -> tuple[l
     cmd = [
         claude_cli_path(), "-p",
         "--model", model,
-        "--append-system-prompt", PRICE_PROMPT if task == "prices" else SYSTEM_PROMPT,
+        "--append-system-prompt", _PROMPTS.get(task, SYSTEM_PROMPT),
         "--mcp-config", cfg_path,
         "--strict-mcp-config",
         "--allowedTools", ",".join(allowed),
@@ -246,31 +299,59 @@ def build_command(task: str, prompt: str, model: str, count: int = 3) -> tuple[l
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
-        prompt,
     ]
+    if task == "receipt":
+        cmd += ["--input-format", "stream-json"]
+    else:
+        cmd.append(prompt)
     return cmd, cfg_path
+
+
+def user_message(prompt: str, images: list[dict]) -> str:
+    """One stream-json user turn: the prompt, then each image in order."""
+    content = [{"type": "text", "text": prompt}] + [
+        {"type": "image", "source": {"type": "base64", "media_type": im["media_type"],
+                                     "data": im["data"]}} for im in images]
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
+
+
+def _feed(proc: subprocess.Popen, message: str) -> None:
+    """Write the receipt turn on its own thread: a photo is bigger than a pipe
+    buffer, and the CLI writes to stdout before it has read all of stdin."""
+    def write() -> None:
+        try:
+            proc.stdin.write(message)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+    threading.Thread(target=write, daemon=True, name="chef-stdin").start()
 
 
 @dataclass
 class _Run:
+    task: str = "suggest"
     tool_names: dict[str, str] = field(default_factory=dict)   # tool_use id → name
     text: list[str] = field(default_factory=list)
     saved: list[dict] = field(default_factory=list)
-    prices: list[dict] = field(default_factory=list)       # recorded by record_price
+    prices: list[dict] = field(default_factory=list)       # record_price, record_receipt_price
     unlisted: list[dict] = field(default_factory=list)     # mark_price_checked
+    unmatched: list[str] = field(default_factory=list)     # receipt lines matching nothing
     fallback: str = ""
 
 
 def run(task: str, *, plan_id: int | None = None, count: int = 3, text: str = "",
-        model: str | None = None) -> Iterator[dict]:
+        model: str | None = None, images: list[dict] | None = None) -> Iterator[dict]:
     """Run one chef job, yielding events for the browser.
 
     Event types: `status` (what it is doing), `recipe` (one saved: id, title),
     `price` (one updated: name, store, old and new), `unlisted` (no listing
-    found), `retry` (a save was rejected and is being fixed), `text` (its
-    closing words), `error`, and finally `done` with the ids saved and the
-    number of prices updated and unlisted.
+    found), `unmatched` (receipt lines matching nothing in the catalog),
+    `retry` (a save was rejected and is being fixed), `text` (its closing
+    words), `error`, and finally `done` with the ids saved and the number of
+    prices updated, unlisted and unmatched.
     """
+    if task == "receipt" and not images:
+        raise ChefError("Add a photo of the receipt.")
     prompt = build_prompt(task, plan_id=plan_id, count=count, text=text)
     if task == "prices":
         from sous_chef import tools
@@ -280,32 +361,36 @@ def run(task: str, *, plan_id: int | None = None, count: int = 3, text: str = ""
             yield {"type": "done", "saved": [], "updated": 0, "unlisted": 0}
             return
     cmd, cfg_path = build_command(task, prompt, model or DEFAULT_MODEL, count)
-    yield {"type": "status",
-           "text": "Starting the price check…" if task == "prices" else "Starting the chef…"}
+    yield {"type": "status", "text": {"prices": "Starting the price check…",
+                                      "receipt": "Reading your receipt…"}.get(task, "Starting the chef…")}
 
     # Run outside the project so this repo's CLAUDE.md is not loaded: the chef
     # should work from tool output, not developer notes.
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, bufsize=1,
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if images else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                             cwd=tempfile.gettempdir())
     assert proc.stdout is not None
-    state = _Run()
+    if images:
+        _feed(proc, user_message(prompt, images))
+    state = _Run(task=task)
     try:
         for line in proc.stdout:
             for event in ingest(line, state):
                 yield event
         _reap(proc)
         closing = "".join(state.text).strip() or state.fallback
-        if not (state.saved or state.prices or state.unlisted):
+        if not (state.saved or state.prices or state.unlisted or state.unmatched):
             err = (proc.stderr.read() if proc.stderr else "").strip()
-            what = "checking a price" if task == "prices" else "saving a recipe"
+            what = {"prices": "checking a price",
+                    "receipt": "reading a price off the receipt"}.get(task, "saving a recipe")
             yield {"type": "error",
                    "text": closing or err[:500] or
                    f"The chef finished without {what}. Check `claude -p hello` works."}
         elif closing:
             yield {"type": "text", "text": closing}
         yield {"type": "done", "saved": [r["id"] for r in state.saved],
-               "updated": len(state.prices), "unlisted": len(state.unlisted)}
+               "updated": len(state.prices), "unlisted": len(state.unlisted),
+               "unmatched": len(state.unmatched)}
     finally:
         _finish(proc, cfg_path)
 
@@ -341,7 +426,7 @@ def ingest(line: str, state: _Run) -> list[dict]:
             if isinstance(b, dict) and b.get("type") == "tool_use":
                 name = (b.get("name") or "").replace(PREFIX, "")
                 state.tool_names[b.get("id", "")] = name
-                label = describe_tool(name, b.get("input") or {})
+                label = describe_tool(name, b.get("input") or {}, state.task)
                 if label:
                     out.append({"type": "status", "text": label, "tool": name})
         return out
@@ -351,7 +436,8 @@ def ingest(line: str, state: _Run) -> list[dict]:
             if not (isinstance(b, dict) and b.get("type") == "tool_result"):
                 continue
             name = state.tool_names.get(b.get("tool_use_id", ""), "")
-            if name not in ("propose_recipe", "record_price", "mark_price_checked"):
+            if name not in ("propose_recipe", "record_price", "mark_price_checked",
+                            "record_receipt_price", "receipt_unmatched"):
                 continue
             body = _result_text(b.get("content"))
             if b.get("is_error"):
@@ -367,9 +453,12 @@ def ingest(line: str, state: _Run) -> list[dict]:
             if name == "propose_recipe" and "id" in result:
                 state.saved.append(result)
                 out.append({"type": "recipe", "id": result["id"], "title": result.get("title", "")})
-            elif name == "record_price" and "new" in result:
+            elif name in ("record_price", "record_receipt_price") and "new" in result:
                 state.prices.append(result)
                 out.append({"type": "price", **result})
+            elif name == "receipt_unmatched":
+                state.unmatched += result.get("lines", [])
+                out.append({"type": "unmatched", **result})
             elif name == "mark_price_checked":
                 state.unlisted.append(result)
                 out.append({"type": "unlisted", **result})
@@ -385,14 +474,14 @@ def _result_text(content) -> str:
     return ""
 
 
-def describe_tool(name: str, args: dict) -> str | None:
+def describe_tool(name: str, args: dict, task: str = "suggest") -> str | None:
     if name == "plan_context":
         return "Reading your week, targets and stores"
     if name == "get_preferences":
         return "Reading your preferences"
     if name == "search_catalog":
         q = args.get("query") or "the catalog"
-        return f"Checking the stores for {q}"
+        return f"Finding {q} in your catalog" if task == "receipt" else f"Checking the stores for {q}"
     if name == "add_ingredient":
         return f"Adding {args.get('name', 'an ingredient')} to the catalog (estimated price)"
     if name == "check_recipe":
@@ -405,6 +494,10 @@ def describe_tool(name: str, args: dict) -> str | None:
         return "Looking through your library"
     if name == "prices_to_check":
         return "Picking which prices to check"
+    if name == "record_receipt_price":
+        return f"Matching {args.get('receipt_line') or args.get('product') or 'a line'}"[:120]
+    if name == "receipt_unmatched":
+        return "Listing what isn't in your catalog"
     if name == "WebSearch":
         return f"Searching: {args.get('query', '')}"[:120]
     if name == "WebFetch":
@@ -502,14 +595,14 @@ _jobs_lock = threading.Lock()
 
 
 def _key(plan_id: int | None, task: str | None = None) -> str:
-    if task == "prices":
-        return "prices"           # one price check at a time, whatever the plan
+    if task in ("prices", "receipt"):
+        return task               # one price check, and one receipt, at a time
     return f"plan-{plan_id}" if plan_id else "library"
 
 
 def start_or_attach(task: str, *, plan_id: int | None = None, count: int = 3,
-                    text: str = "", model: str | None = None,
-                    scheduled: bool = False) -> tuple[Job, bool]:
+                    text: str = "", model: str | None = None, scheduled: bool = False,
+                    images: list[dict] | None = None) -> tuple[Job, bool]:
     """The plan's running job if there is one (attached=True), else a new one.
 
     A bad request (no text to craft from, say) raises ChefError here, before
@@ -521,20 +614,23 @@ def start_or_attach(task: str, *, plan_id: int | None = None, count: int = 3,
         if job and not job.done:
             return job, True
         build_prompt(task, plan_id=plan_id, count=count, text=text)
+        if task == "receipt" and not images:
+            raise ChefError("Add a photo of the receipt.")
         job = Job(key=key, task=task)
         _jobs[key] = job
-    threading.Thread(target=_drive, args=(job, task, plan_id, count, text, model, scheduled),
+    threading.Thread(target=_drive, args=(job, task, plan_id, count, text, model, scheduled, images),
                      daemon=True, name=f"chef-{key}").start()
     return job, False
 
 
 def _drive(job: Job, task: str, plan_id: int | None, count: int, text: str,
-           model: str | None, scheduled: bool = False) -> None:
+           model: str | None, scheduled: bool = False, images: list[dict] | None = None) -> None:
     if task == "prices":
         from sous_chef import tools
         tools.note_price_run(started=True, scheduled=scheduled, limit=count)
     try:
-        for event in run(task, plan_id=plan_id, count=count, text=text, model=model):
+        for event in run(task, plan_id=plan_id, count=count, text=text, model=model,
+                         images=images):
             job.add(event)
     except ChefError as e:
         job.add({"type": "error", "text": str(e)})
@@ -543,21 +639,32 @@ def _drive(job: Job, task: str, plan_id: int | None, count: int, text: str,
         job.add({"type": "error", "text": f"{type(e).__name__}: {e}"})
         job.add({"type": "done", "saved": []})
     finally:
-        if task == "prices":
+        if task in ("prices", "receipt"):
             _note_prices(job)
         job.finish()
 
 
 def _note_prices(job: Job) -> None:
-    """What the price check found, for the Pantry tab and the next schedule."""
+    """What a price check or receipt found, for the Pantry tab (and, for a
+    price check, the next schedule)."""
     from sous_chef import tools
     try:
         changes = [{k: e.get(k) for k in ("name", "store_name", "old", "new", "change_pct")}
                    for e in job.events if e["type"] == "price"]
         errors = [e["text"] for e in job.events if e["type"] == "error"]
+        error = errors[-1][:300] if errors else None
+        if job.task == "receipt":
+            texts = [e["text"] for e in job.events if e["type"] == "text"]
+            tools.note_receipt(updated=len(changes), changes=changes[:60], error=error,
+                               store=next((e["store_name"] for e in job.events
+                                           if e["type"] == "price"), None),
+                               unmatched=[ln for e in job.events if e["type"] == "unmatched"
+                                          for ln in e.get("lines", [])][:60],
+                               closing=texts[-1][:300] if texts else None)
+            return
         tools.note_price_run(updated=len(changes), changes=changes[:60],
                              unlisted=sum(e["type"] == "unlisted" for e in job.events),
-                             error=errors[-1][:300] if errors else None)
+                             error=error)
     except Exception:  # bookkeeping must not stop the job from finishing
         pass
 

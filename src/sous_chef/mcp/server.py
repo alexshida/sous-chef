@@ -170,6 +170,30 @@ def mark_price_checked(ingredient_id: str, store: str) -> dict:
     return _wrap(tools.mark_price_checked)(ingredient_id, store)
 
 
+@mcp.tool()
+def record_receipt_price(ingredient_id: str, store: str, price: float, product: str,
+                         receipt_line: str, pkg_qty: float | None = None,
+                         pkg_unit: str | None = None, large_change: bool = False) -> dict:
+    """Record a price from the user's receipt; it becomes their own price at that store.
+
+    price is what ONE package cost, from the item's own line: for "2 @ 1.09"
+    it is 1.09; for a weighed item ("1.32 lb @ 2.49/lb") it is 2.49 with
+    pkg_qty=1, pkg_unit="lb". Give pkg_qty and pkg_unit when the line shows a
+    size ("JASMINE RICE 2LB"); otherwise leave them out and the package on
+    file is used (package_assumed in the result). product is a readable name
+    for it; receipt_line is the line as printed. A price per lb more than 3×
+    from the one on file is sent back as a likely mix-up.
+    """
+    return _wrap(tools.record_receipt_price)(ingredient_id, store, price, product, receipt_line,
+                                             pkg_qty, pkg_unit, large_change)
+
+
+@mcp.tool()
+def receipt_unmatched(store: str, lines: list[str]) -> dict:
+    """List the receipt's food lines, as printed, that match nothing in the catalog."""
+    return _wrap(tools.receipt_unmatched)(store, lines)
+
+
 # ── recipes ──────────────────────────────────────────────────
 
 @mcp.tool()

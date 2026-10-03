@@ -32,7 +32,8 @@ def _call(name, args):
 # ── MCP ──────────────────────────────────────────────────────
 
 def test_allowed_chef_tools_match_the_mcp_server():
-    exposed = {t.replace(chef.PREFIX, "") for t in chef._TOOLS + chef._PRICE_TOOLS}
+    exposed = {t.replace(chef.PREFIX, "")
+               for t in chef._TOOLS + chef._PRICE_TOOLS + chef._RECEIPT_TOOLS}
     assert exposed == {t.name for t in _tools()}
 
 

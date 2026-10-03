@@ -6,6 +6,8 @@ The REST endpoints are deliberately thin — every one is a direct call into
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -276,6 +278,7 @@ def api_price_status():
     """When prices were last checked online, what changed, and what is due."""
     status = _call(tools.price_check_status)
     status["running"] = chef.current_job(None, task="prices") is not None
+    status["receipt_running"] = chef.current_job(None, task="receipt") is not None
     return status
 
 
@@ -292,6 +295,49 @@ def api_price_check(req: PriceCheck):
         raise HTTPException(status_code=422, detail="a price check looks up 1–40 prices")
     try:
         job, attached = chef.start_or_attach("prices", count=count)
+    except chef.ChefError as e:
+        return _sse([{"type": "error", "text": str(e)}, {"type": "done", "saved": []}])
+    return _sse(_follow(job, attached))
+
+
+class Receipt(BaseModel):
+    images: list[str]              # data: URLs (or bare base64 JPEG), top of the receipt first
+    note: str = ""
+
+
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024   # Claude's per-image limit
+_MAX_IMAGES = 8
+
+
+def _receipt_image(data: str) -> dict:
+    media = "image/jpeg"
+    if data.startswith("data:"):
+        head, _, data = data.partition(",")
+        media = head[5:].split(";")[0]
+    if media not in chef.IMAGE_TYPES:
+        raise HTTPException(status_code=422, detail=f"A receipt photo must be JPEG, PNG, WebP "
+                                                    f"or GIF, not {media or 'unknown'}.")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=422, detail="That photo didn't arrive intact — try again.")
+    if len(raw) > _MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=422, detail="That photo is too large (over 5 MB).")
+    return {"media_type": media, "data": data}
+
+
+@app.post("/api/receipt")
+def api_receipt(req: Receipt):
+    """Read a receipt photo and make its prices yours, streaming progress.
+
+    The page sends a long receipt as a few overlapping strips so the text
+    stays legible. The photo is handed to the CLI and kept nowhere.
+    """
+    if not 1 <= len(req.images) <= _MAX_IMAGES:
+        raise HTTPException(status_code=422, detail=f"Send 1–{_MAX_IMAGES} photos of the receipt.")
+    images = [_receipt_image(i) for i in req.images]
+    try:
+        job, attached = chef.start_or_attach("receipt", text=req.note[:500], images=images)
     except chef.ChefError as e:
         return _sse([{"type": "error", "text": str(e)}, {"type": "done", "saved": []}])
     return _sse(_follow(job, attached))

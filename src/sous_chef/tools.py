@@ -423,6 +423,75 @@ def mark_price_checked(ingredient_id: str, store: str) -> dict:
             "store_name": STORES[store], "checked": True}
 
 
+# ── prices off a receipt ─────────────────────────────────────
+#
+# A photo of your receipt, read by Claude: each line it can match to the
+# catalog becomes your price at that store. Unlike a price found online, a
+# receipt is your own evidence, so it replaces any earlier price (one you
+# typed included) and can add an offer the catalog lacked — you bought it
+# there. Lines rarely print a package size, so the package already on file
+# is assumed unless the line gives one, and the result says which.
+
+RECEIPT_RUN = "receipt_scan"
+
+
+def record_receipt_price(ingredient_id: str, store: str, price: float, product: str,
+                         receipt_line: str, pkg_qty: float | None = None,
+                         pkg_unit: str | None = None, large_change: bool = False) -> dict:
+    """Record what one package cost on the user's receipt, as their own price."""
+    ing = db.get_ingredient(ingredient_id)
+    if not ing:
+        raise ToolError(_unknown_ingredient(ingredient_id))
+    if store not in STORES:
+        raise ToolError(f"store must be one of {', '.join(STORES)}")
+    if not price or price <= 0:
+        raise ToolError("price is what one package cost, and must be positive")
+    current = ing["offers"].get(store)
+    reference = current or next(iter(ing["offers"].values()), None)
+    assumed = pkg_qty is None or not pkg_unit
+    if assumed:
+        if not reference:
+            raise ToolError(f"No package size on file for {ing['name']}: give pkg_qty and pkg_unit.")
+        pkg_qty, pkg_unit = reference["pkg_qty"], reference["pkg_unit"]
+    unit = normalize_unit(pkg_unit)
+    try:
+        new_g = to_grams(float(pkg_qty), unit, ing)
+    except UnitError as e:
+        raise ToolError(f"{e} Give the package in one of those units.")
+    ratio = 1.0
+    if reference:
+        try:
+            ratio = (price / new_g) / (reference["price"] / package_grams(ing, reference))
+        except (UnitError, ZeroDivisionError):
+            pass
+    if not large_change and not 1 / _MAX_JUMP <= ratio <= _MAX_JUMP:
+        raise ToolError(
+            f"That is {ratio:.1f}× the price on file for {ing['name']} per pound — usually a "
+            f"package or quantity mix-up: a line for several items ('2 @ 1.09' is 1.09 each), "
+            f"a price by weight (record the per-lb price with pkg_qty=1, pkg_unit='lb'), or a "
+            f"different size (give pkg_qty and pkg_unit). Is it the same food? If the receipt "
+            f"really says that, call again with large_change=true.")
+    # The same package as on file is the same product: keep its readable name
+    # rather than the receipt's abbreviation.
+    keep_name = current["product"] if current and assumed else None
+    name = keep_name or (product or "").strip() or ing["name"]
+    db.upsert_offer(ingredient_id, store, price=round(float(price), 2), pkg_qty=float(pkg_qty),
+                    pkg_unit=unit, product=name, source="receipt")
+    pkg = lambda o: f"{format_qty(o['pkg_qty'])} {o['pkg_unit']}"
+    return {"ingredient_id": ingredient_id, "name": ing["name"], "store": store,
+            "store_name": STORES[store], "line": receipt_line,
+            "old": {"price": current["price"], "package": pkg(current)} if current else None,
+            "new": {"price": round(float(price), 2), "package": f"{format_qty(float(pkg_qty))} {unit}"},
+            "change_pct": round((ratio - 1) * 100) if current else None,
+            "package_assumed": assumed}
+
+
+def receipt_unmatched(store: str, lines: list[str]) -> dict:
+    """The food lines that match nothing in the catalog, for the user to see."""
+    lines = [str(x).strip() for x in lines if str(x).strip()][:60]
+    return {"store": store, "store_name": STORES.get(store, store), "lines": lines}
+
+
 def price_check_due(now: datetime | None = None) -> bool:
     """Whether the every-N-days price check should run now. A check that failed
     (Claude signed out, no network) is retried a day later, not N days."""
@@ -448,6 +517,13 @@ def note_price_run(**fields: Any) -> dict:
     return run
 
 
+def note_receipt(**fields: Any) -> dict:
+    """Record what the last receipt scan did, for the Pantry tab."""
+    scan = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **fields}
+    db.set_meta(RECEIPT_RUN, scan)
+    return scan
+
+
 def price_check_status() -> dict:
     """When prices were last checked online, what it found, and what is due."""
     prefs = _prefs()
@@ -463,7 +539,8 @@ def price_check_status() -> dict:
     online = sum(1 for ing in _catalog().values() for o in ing["offers"].values()
                  if o["source"] == "web" and o["store"] in stores)
     waiting = len(prices_to_check(limit=0, stale_days=max(prefs.price_refresh_days, 1)))
-    return {"last": last, "refresh_days": prefs.price_refresh_days,
+    return {"last": last, "receipt": db.get_meta(RECEIPT_RUN),
+            "refresh_days": prefs.price_refresh_days,
             "items": prefs.price_check_items, "next_due": next_due,
             "online": online, "waiting": waiting}
 

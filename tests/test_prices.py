@@ -257,7 +257,7 @@ def test_a_price_check_streams_what_it_changed(fresh_db, fake_price_cli):
     assert "Reading traderjoes.com" in statuses
     price = next(e for e in events if e["type"] == "price")
     assert price["old"]["price"] == 7.49 and price["new"]["price"] == 7.99
-    assert events[-1] == {"type": "done", "saved": [], "updated": 1, "unlisted": 1}
+    assert events[-1] == {"type": "done", "saved": [], "updated": 1, "unlisted": 1, "unmatched": 0}
 
 
 def test_a_price_check_is_recorded_for_the_schedule(fresh_db, fake_price_cli):
