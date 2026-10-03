@@ -303,7 +303,14 @@ const few = (names, n = 3) => names.length <= n ? names.join(' · ')
 const DOWS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const STATUS_LABEL = {home:'Free', busy:'Busy', out:'Out', away:'Away'};
 const STATUS_CYCLE = [null, 'home', 'busy', 'out', 'away'];
-const ORIGIN = {library:'', claude:'✨ Claude', craft:'✨ Crafted', import:'Imported'};
+// Where a recipe came from, as a card says it: saved in your library, or
+// freshly written by Claude and not kept unless you save it.
+function sourceLabel(r){
+  if(r.in_library) return r.source === 'library' ? ['📚 Your library', ''] : ['📚 Saved', ''];
+  if(r.source === 'import') return ['Imported · not saved', 'accent'];
+  if(r.source === 'craft') return ['✨ Crafted for you', 'accent'];
+  return ['✨ Fresh from Claude', 'accent'];
+}
 
 const S = {plan:null, prefs:null, tab:'plan', refreshNudge:null, grocery:null, recipes:null, catalog:null,
            chef:{busy:false, lines:[], saved:new Set()}, open:{}, sheet:null, cuisine:''};
@@ -322,7 +329,9 @@ async function api(method, path, body){
   setOffline(false);
   if(!res.ok){
     const j = await res.json().catch(() => ({detail: res.statusText}));
-    const err = new Error(typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail));
+    const err = new Error(typeof j.detail === 'string' ? j.detail
+                          : j.detail?.message || JSON.stringify(j.detail));
+    err.detail = j.detail;
     err.status = res.status;
     throw err;
   }
@@ -475,7 +484,9 @@ function recipeMeta(r, {servings = false} = {}){
 function recipeTags(r, extra = [], {cuisine = true} = {}){
   const t = r.targets || {}, tags = [...extra];
   if(cuisine) tags.push(`<span class="pill">${esc(r.cuisine_name)}</span>`);
-  if(ORIGIN[r.origin]) tags.push(`<span class="pill accent">${ORIGIN[r.origin]}</span>`);
+  const [label, cls] = sourceLabel(r);
+  tags.push(`<span class="pill ${cls}">${label}</span>`);
+  if(r.clash) tags.push(`<span class="pill warn list">looks like “${esc(short(r.clash.title))}” in your library</span>`);
   if(r.batch_friendly === false && S.plan?.meal_prep) tags.push(`<span class="pill warn">not a batch recipe</span>`);
   if(t.protein === false) tags.push(`<span class="pill warn">${g(t.protein_gap)} g short on protein</span>`);
   if(t.fiber === false) tags.push(`<span class="pill warn">low fiber</span>`);
@@ -505,7 +516,8 @@ function renderChosen(p){
         <select data-action="cookday" data-id="${r.id}" aria-label="Cook day">
           <option value="">${r.cook_date && r.cook_date_auto ? 'Auto: ' + fmtDate(r.cook_date, {weekday:'short'}) : 'Auto'}</option>${days}</select>
       </div>
-      ${r.unavailable.length ? recipeTags(r) : ''}
+      ${r.unavailable.length || !r.in_library ? recipeTags(r, [], {cuisine: false}) : ''}
+      ${r.in_library ? '' : `<div class="cardrow"><button class="ghost small" data-action="save" data-id="${r.id}">📚 Save to library</button></div>`}
     </div>`;
   }).join('');
   // "Auto" shows the auto-picked day; a pinned day shows as selected.
@@ -530,7 +542,8 @@ function renderCands(p){
         p.selected.length ? `<span class="pill ${r.adds_to_bill < r.total_cost * .8 ? 'good' : ''}">+${money(r.adds_to_bill)} to your list</span>` : '',
         r.shares.length ? `<span class="pill good list">shares ${esc(few(r.shares.map(short)).toLowerCase())}</span>` : ''])}
       <div class="cardrow"><button class="primary" data-action="select" data-id="${r.id}">Add to week</button>
-        <button data-action="view" data-id="${r.id}">Recipe</button></div>
+        <button data-action="view" data-id="${r.id}">Recipe</button>
+        ${r.in_library ? '' : `<button class="ghost small" data-action="save" data-id="${r.id}">📚 Save</button>`}</div>
     </div>`).join('') : `<div class="empty">No suggestions right now.</div>`;
   el.innerHTML = `
     <h2>Suggestions<span class="right small">${cands.length}</span></h2>
@@ -686,6 +699,48 @@ async function endChef(){
   if(S.tab === 'recipes') loadRecipes();
 }
 
+// ── saving to the library ──────────────────────────────────
+// A near-copy of a recipe already saved is not saved until you choose:
+// keep both, let this one replace the other, or leave it out.
+function knownRecipe(id){
+  if(S.sheet?.id === id) return S.sheet;
+  return [...(S.plan?.candidates || []), ...(S.plan?.selected || [])].find(r => r.id === id);
+}
+async function saveRecipe(id, onClash = null){
+  const wasOpen = S.sheet?.id === id ? S.sheet.servings : null;
+  const r = knownRecipe(id);
+  if(!onClash && r?.clash){       // the page already knows; ask before asking the server
+    return askAboutClash(id, {clash: r.clash,
+      message: `‘${r.title}’ looks like ‘${r.clash.title}’, already in your library (${r.clash.reason}).`});
+  }
+  try{
+    const out = await api('POST', `/api/recipe/${id}/library`, {keep: true, on_clash: onClash});
+    toast(out.replaced ? 'Saved — it replaces the old one in your library' : 'Saved to your library');
+  }catch(e){
+    if(e.detail?.clash) return askAboutClash(id, e.detail);
+    return fail(e);
+  }
+  closeSheet();
+  await refreshPlanQuietly(); renderPlan();
+  if(S.tab === 'recipes') loadRecipes();
+  if(wasOpen) openRecipe(id, wasOpen);
+}
+function askAboutClash(id, detail){
+  const c = detail.clash;
+  $('#sheet-body').innerHTML = `
+    <button class="ghost close" data-action="close" aria-label="Close">✕</button>
+    <h2>Already in your library?</h2>
+    <p>${esc(detail.message)}</p>
+    <p class="small muted">Check it if you're not sure: <button class="ghost small" data-action="view" data-id="${c.id}">open “${esc(c.title)}”</button></p>
+    <div style="display:grid;gap:.5rem;margin-top:.8rem">
+      <button class="primary" data-action="save-new" data-id="${id}">Save as a new recipe</button>
+      <button data-action="save-replace" data-id="${id}">Replace “${esc(short(c.title))}” with this one</button>
+      <button class="ghost" data-action="close">Don’t save</button>
+    </div>`;
+  $('#sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
 // ── recipe sheet ───────────────────────────────────────────
 async function openRecipe(id, servings){
   const qs = new URLSearchParams();
@@ -722,7 +777,8 @@ async function openRecipe(id, servings){
       ${chosen ? `<button data-action="deselect" data-id="${r.id}">Remove from week</button>`
                : `<button class="primary" data-action="select" data-id="${r.id}" data-servings="${r.servings}">Add to week · ${r.servings} servings</button>`}
       <span class="spacer"></span>
-      ${r.in_library ? '' : `<button class="ghost small" data-action="keep" data-id="${r.id}">Save to library</button>`}
+      ${r.in_library ? `<button class="ghost small" data-action="unsave" data-id="${r.id}">Remove from library</button>`
+                     : `<button class="ghost small" data-action="save" data-id="${r.id}">📚 Save to library</button>`}
     </div>`;
   $('#sheet').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -1005,7 +1061,14 @@ async function act(a, el){
         if(chosen){ S.plan = await api('POST', `/api/plan/${p.id}/servings`, {recipe_id: r.id, servings: n}); renderPlan(); }
         return openRecipe(r.id, n);
       }
-      case 'keep': await api('POST', `/api/recipe/${id}/library`, {keep: true}); toast('Saved to your library'); return openRecipe(id, S.sheet?.servings);
+      case 'save': return saveRecipe(id);
+      case 'save-new': return saveRecipe(id, 'new');
+      case 'save-replace': return saveRecipe(id, 'replace');
+      case 'unsave': {
+        await api('POST', `/api/recipe/${id}/library`, {keep: false});
+        toast('Removed from your library'); await refreshPlanQuietly(); renderPlan();
+        return openRecipe(id, S.sheet?.servings);
+      }
       case 'close': return closeSheet();
       case 'fresh': return freshBatch();
       case 'keep-suggestions': S.refreshNudge = null; return renderPlan();
