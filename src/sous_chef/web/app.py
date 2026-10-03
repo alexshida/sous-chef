@@ -45,6 +45,8 @@ async def _restrict_to_private_networks(request, call_next):
 def _call(fn, *args, **kwargs) -> Any:
     try:
         return fn(*args, **kwargs)
+    except tools.ClashError as e:
+        raise HTTPException(status_code=409, detail={"message": str(e), "clash": e.clash})
     except tools.ToolError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:  # surfaced rather than swallowed
@@ -280,11 +282,14 @@ def api_recipe(recipe_id: int, servings: int | None = None, plan_id: int | None 
 
 class Keep(BaseModel):
     keep: bool = True
+    on_clash: str | None = None          # new | replace, once the user has chosen
 
 
 @app.post("/api/recipe/{recipe_id}/library")
 def api_keep(recipe_id: int, req: Keep):
-    return _call(tools.save_to_library, recipe_id, req.keep)
+    """Save to (or remove from) the library. A near-copy of a recipe already
+    there answers 409 with the clash, for the page to ask what to do."""
+    return _call(tools.save_to_library, recipe_id, req.keep, req.on_clash)
 
 
 @app.delete("/api/recipe/{recipe_id}")

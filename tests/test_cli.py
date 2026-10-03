@@ -61,7 +61,7 @@ def test_restart_loads_a_service_that_was_unloaded(mac, monkeypatch):
 
 def test_dedupe_lists_before_it_merges(fresh_db):
     result = CliRunner().invoke(main.cli, ["dedupe"])
-    assert result.exit_code == 0 and "No duplicate recipes" in result.output
+    assert result.exit_code == 0 and "No recipes saved more than once" in result.output
 
 
 def test_doctor_reports_and_says_what_to_fix(fresh_db, monkeypatch):

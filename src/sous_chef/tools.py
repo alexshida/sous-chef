@@ -24,7 +24,7 @@ from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sous_chef import calendars, grocery, schedule
+from sous_chef import calendars, grocery, schedule, similarity
 from sous_chef.config import CUISINES, STORES, Preferences, load_prefs, save_prefs
 from sous_chef.costing import choose_offer, cost_recipe, meets_targets, package_grams
 from sous_chef.storage import db
@@ -33,6 +33,18 @@ from sous_chef.units import UnitError, allowed_units, format_qty, normalize_unit
 
 class ToolError(Exception):
     """A failure the caller should see and can act on."""
+
+
+class ClashError(ToolError):
+    """Saving would put a near-copy of an existing recipe in the library.
+
+    `clash` names the recipe it resembles and how closely, so the caller can
+    ask: save as a new recipe, replace the existing one, or don't save.
+    """
+
+    def __init__(self, message: str, clash: dict):
+        super().__init__(message)
+        self.clash = clash
 
 
 def _catalog() -> dict[str, dict]:
@@ -323,7 +335,8 @@ def get_recipe(recipe_id: int, servings: int | None = None, plan_id: int | None 
     prefs = _prefs()
     costed = cost_recipe(r, _catalog(), servings=servings, stores=_stores_for(plan_id),
                          pantry=db.pantry_ids())
-    return {**_summary(r, costed, prefs), "lines": costed["lines"], "steps": r["steps"]}
+    return {**_summary(r, costed, prefs), "lines": costed["lines"], "steps": r["steps"],
+            "clash": None if r["in_library"] else library_clash(r["id"])}
 
 
 def list_recipes(query: str = "", cuisine: str | None = None,
@@ -409,8 +422,13 @@ def propose_recipe(recipe: dict, plan_id: int | None = None, origin: str = "clau
     """Save a recipe and, with `plan_id`, offer it as a candidate for that week.
 
     origin: claude (a fresh suggestion), craft (made to the user's request), or
-    import (the user's own recipe, converted). Crafted and imported recipes go
-    straight into the library; plain suggestions join it once chosen.
+    import (the user's own recipe, converted). Nothing Claude writes goes into
+    the library by itself — the user saves what they want to keep. An import is
+    the user's own recipe and goes straight in, unless it looks like one
+    already there, in which case they are asked.
+
+    A suggestion that is a near-copy of one already offered this week or in
+    the library — the same main ingredients under another name — is refused.
     """
     if origin not in ("claude", "craft", "import"):
         raise ToolError("origin must be claude, craft or import")
@@ -433,7 +451,14 @@ def propose_recipe(recipe: dict, plan_id: int | None = None, origin: str = "clau
                         f"(recipe {existing['id']}). Give this one a title that tells them apart, "
                         "e.g. by its source or what makes it different.")
     else:
-        rid = db.insert_recipe(clean, source=origin, in_library=origin != "claude")
+        twin = _near_copy(clean, plan_id)
+        if twin and origin == "claude":
+            other, where, score = twin
+            raise ToolError(f"Too close to '{other['title']}', already {where} (recipe {other['id']}): "
+                            f"{round(score['ingredients'] * 100)}% the same ingredients by weight. "
+                            "Propose a genuinely different dish — another protein, base or cuisine.")
+        keep = origin == "import" and not twin
+        rid = db.insert_recipe(clean, source=origin, in_library=keep)
     if plan_id is not None:
         db.add_candidate(plan_id, rid, origin)
     # Reported at the servings it was written for; cards scale it to the
@@ -444,6 +469,38 @@ def propose_recipe(recipe: dict, plan_id: int | None = None, origin: str = "clau
     if already:
         result["already_saved"] = True
     return result
+
+
+def _near_copy(recipe: dict, plan_id: int | None) -> tuple[dict, str, dict] | None:
+    """A recipe offered this week, or in the library, that `recipe` duplicates."""
+    cat = _catalog()
+    if plan_id is not None:
+        ids = ({c["recipe_id"] for c in db.candidates(plan_id, include_dismissed=True)}
+               | {s["recipe_id"] for s in db.selections(plan_id)})
+        week = [r for r in (db.get_recipe(i) for i in sorted(ids)) if r]
+        hit = similarity.most_similar(recipe, week, cat)
+        if hit:
+            return hit[0], "offered this week", hit[1]
+    hit = similarity.most_similar(recipe, db.list_recipes(library_only=True), cat)
+    return (hit[0], "in the library", hit[1]) if hit else None
+
+
+def library_clash(recipe_id: int) -> dict | None:
+    """The library recipe this one would duplicate, if saved — or None."""
+    r = db.get_recipe(recipe_id)
+    if not r:
+        raise ToolError(f"No recipe {recipe_id}.")
+    library = [x for x in db.list_recipes(library_only=True) if x["id"] != r["id"]]
+    same_name = next((x for x in library if title_key(x["title"]) == title_key(r["title"])), None)
+    if same_name:
+        return {"id": same_name["id"], "title": same_name["title"], "reason": "the same name",
+                "ingredients": similarity.compare(r, same_name, _catalog())["ingredients"]}
+    hit = similarity.most_similar(r, library, _catalog())
+    if not hit:
+        return None
+    other, score = hit
+    return {"id": other["id"], "title": other["title"], "ingredients": score["ingredients"],
+            "reason": f"{round(score['ingredients'] * 100)}% the same ingredients"}
 
 
 def title_key(title: str) -> str:
@@ -506,11 +563,37 @@ def merge_duplicate_recipes(apply: bool = False) -> list[dict]:
     return groups
 
 
-def save_to_library(recipe_id: int, keep: bool = True) -> dict:
-    if not db.get_recipe(recipe_id):
+def save_to_library(recipe_id: int, keep: bool = True, on_clash: str | None = None) -> dict:
+    """Keep a recipe in the library (or, with keep=False, take it out).
+
+    If it looks like a recipe already there, this raises ClashError naming it,
+    unless `on_clash` says what to do: "new" saves it alongside as a recipe of
+    its own; "replace" saves it in place of the other — which leaves the
+    library, its places in plans moving to this one (a starter recipe is just
+    hidden, so reseeding does not bring it back).
+    """
+    r = db.get_recipe(recipe_id)
+    if not r:
         raise ToolError(f"No recipe {recipe_id}.")
-    db.set_in_library(recipe_id, keep)
-    return {"id": recipe_id, "in_library": keep}
+    if not keep:
+        db.set_in_library(recipe_id, False)
+        return {"id": recipe_id, "in_library": False}
+    if on_clash not in (None, "new", "replace"):
+        raise ToolError("on_clash must be new or replace")
+    replaced = None
+    clash = None if r["in_library"] else library_clash(recipe_id)
+    if clash and on_clash is None:
+        raise ClashError(f"'{r['title']}' looks like '{clash['title']}', already in your library "
+                         f"({clash['reason']}).", clash)
+    if clash and on_clash == "replace":
+        other = db.get_recipe(clash["id"])
+        if other and other.get("seed_key"):
+            db.set_in_library(other["id"], False)
+        else:
+            db.merge_recipe(keep=recipe_id, dup=clash["id"])
+        replaced = clash["id"]
+    db.set_in_library(recipe_id, True)
+    return {"id": recipe_id, "in_library": True, "replaced": replaced}
 
 
 def delete_recipe(recipe_id: int) -> dict:
@@ -671,6 +754,7 @@ def get_plan(plan_id: int | None = None) -> dict:
             continue
         costed = cost_recipe(r, cat, servings=s["servings"], stores=stores, pantry=pantry)
         selected.append({**_summary(r, costed, prefs),
+                         "clash": None if r["in_library"] else library_clash(r["id"]),
                          "cook_date": week["cook_dates"].get(r["id"]),
                          "cook_date_auto": week["auto_assigned"].get(r["id"], False)})
 
@@ -690,6 +774,7 @@ def get_plan(plan_id: int | None = None) -> dict:
             # the page offers a refresh, counting the ones that no longer fit.
             "fits": not costed["unavailable"] and (batch or not plan["meal_prep"]),
             "batch_friendly": batch,
+            "clash": None if r["in_library"] else library_clash(r["id"]),
             "adds_to_bill": grocery.marginal_cost((r, serve), pairs, cat,
                                                   stores=stores, pantry=pantry),
             "shares": grocery.shared_perishables(r, pairs, cat),
@@ -782,7 +867,8 @@ def suggest_from_library(plan_id: int, count: int = 4, replace: bool = True) -> 
             score -= 0.5
         scored.append((r["id"] in offered, -score, r["id"]))
     scored.sort()                        # never offered first, then best score
-    picked = _diverse([rid for _, _, rid in scored], count)
+    ranked = _distinct([rid for _, _, rid in scored], against=chosen | showing_now(plan["id"]))
+    picked = _diverse(ranked, count)
     for rid in picked:
         db.add_candidate(plan["id"], rid, "library")
     out = get_plan(plan["id"])
@@ -804,6 +890,42 @@ def fresh_suggestions(plan_id: int, library: int | None = None) -> dict:
     if count <= 0:
         return get_plan(plan["id"])
     return suggest_from_library(plan["id"], count, replace=False)
+
+
+def showing_now(plan_id: int) -> set[int]:
+    return {c["recipe_id"] for c in db.candidates(plan_id)}
+
+
+def _distinct(ranked: list[int], against: set[int]) -> list[int]:
+    """Drop any recipe that is a near-copy of one ranked above it or already
+    on the plan — a saved Claude version of a starter recipe, say."""
+    cat = _catalog()
+    kept: list[dict] = [r for r in (db.get_recipe(i) for i in against) if r]
+    out = []
+    for rid in ranked:
+        r = db.get_recipe(rid)
+        if r and not similarity.most_similar(r, kept, cat):
+            out.append(rid)
+            kept.append(r)
+    return out
+
+
+def find_lookalike_recipes() -> list[dict]:
+    """Library recipes that are near-copies of each other under different
+    names. Not merged automatically — which to keep is a judgement call."""
+    cat = _catalog()
+    library = db.list_recipes(library_only=True)
+    pairs = []
+    for i, a in enumerate(library):
+        for b in library[i + 1:]:
+            if title_key(a["title"]) == title_key(b["title"]):
+                continue                 # exact names are merged by merge_duplicate_recipes
+            c = similarity.compare(a, b, cat)
+            if c["same"]:
+                pairs.append({"a": {"id": a["id"], "title": a["title"]},
+                              "b": {"id": b["id"], "title": b["title"]},
+                              "ingredients": c["ingredients"]})
+    return pairs
 
 
 def _diverse(ranked: list[int], count: int) -> list[int]:
@@ -840,7 +962,6 @@ def select_recipe(plan_id: int, recipe_id: int, servings: int | None = None) -> 
     if not 1 <= servings <= 24:
         raise ToolError("servings must be between 1 and 24")
     db.select_recipe(plan["id"], recipe_id, servings)
-    db.set_in_library(recipe_id, True)   # chosen once, kept for good
     return get_plan(plan["id"])
 
 

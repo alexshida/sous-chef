@@ -153,7 +153,9 @@ def propose_recipe(recipe: Recipe, plan_id: int | None = None,
     origin: claude for your own suggestions, craft when made to the user's
     request, import when converting a recipe the user supplied. Returns the
     computed cost and nutrition per serving. A validation error names the fix —
-    correct it and call again.
+    correct it and call again. A suggestion that is a near-copy of a recipe
+    already offered or in the library (same main ingredients, another name) is
+    refused: write a genuinely different dish instead.
     """
     return _wrap(tools.propose_recipe)(recipe.model_dump(), plan_id, origin)
 

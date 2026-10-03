@@ -92,15 +92,22 @@ def test_proposed_recipe_is_costed_and_offered(plan):
     p = tools.get_plan(plan["id"])
     cand = next(c for c in p["candidates"] if c["id"] == out["id"])
     assert cand["origin"] == "claude" and cand["tags"] == ["vegetarian"]
-    # a plain suggestion joins the library only once chosen
+    # nothing Claude writes is saved by itself — not even when chosen
     assert not db.get_recipe(out["id"])["in_library"]
     tools.select_recipe(plan["id"], out["id"])
+    assert not db.get_recipe(out["id"])["in_library"]
+    assert tools.save_to_library(out["id"])["in_library"]
     assert db.get_recipe(out["id"])["in_library"]
 
 
-def test_crafted_and_imported_recipes_go_straight_to_the_library(fresh_db):
-    out = tools.propose_recipe(GOOD, None, "import")
-    assert db.get_recipe(out["id"])["in_library"]
+def test_imports_go_straight_to_the_library_but_crafts_wait_to_be_saved(fresh_db):
+    imported = tools.propose_recipe(GOOD, None, "import")
+    assert db.get_recipe(imported["id"])["in_library"]
+    crafted = tools.propose_recipe({**GOOD, "title": "Something Else Entirely",
+                                    "ingredients": [{"id": "tofu-extra-firm", "qty": 1, "unit": "block"},
+                                                    {"id": "bok-choy", "qty": 1, "unit": "lb"}]},
+                                   None, "craft")
+    assert not db.get_recipe(crafted["id"])["in_library"]
 
 
 def test_an_unknown_ingredient_names_close_matches(plan):

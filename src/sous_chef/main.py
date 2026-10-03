@@ -223,8 +223,15 @@ def dedupe(do_apply: bool):
     from sous_chef.storage.db import init_db
     init_db()
     groups = tools.merge_duplicate_recipes(apply=do_apply)
+    lookalikes = tools.find_lookalike_recipes()
+    if lookalikes:
+        console.print("[bold]Look alike[/bold] [dim](same main ingredients, different names — "
+                      "not merged; remove one from the library in the app if you like)[/dim]")
+        for pair in lookalikes:
+            console.print(f"  #{pair['a']['id']} {pair['a']['title']}  ≈  #{pair['b']['id']} "
+                          f"{pair['b']['title']}  [dim]{round(pair['ingredients'] * 100)}% shared[/dim]")
     if not groups:
-        console.print("[green]✓ No duplicate recipes[/green]")
+        console.print("[green]✓ No recipes saved more than once[/green]")
         return
     for g in groups:
         console.print(f"  {g['title']}  [dim]keep #{g['keep']}, "

@@ -237,3 +237,17 @@ def test_prefs_say_whether_claude_is_available(client, monkeypatch):
     assert prefs["claude_available"] is False
     prefs["batch_claude"] = 2
     assert client.put("/api/prefs", json=prefs).json()["batch_claude"] == 2
+
+
+
+def test_a_save_clash_is_a_structured_conflict(client):
+    from sous_chef.storage import db as store
+    plan = client.post("/api/plan", json={"suggest": False}).json()
+    chana = next(r for r in store.list_recipes() if r["title"].startswith("Chana"))
+    twin = {k: chana[k] for k in ("cuisine", "summary", "servings", "active_min", "total_min",
+                                  "ingredients", "steps", "tags")}
+    rid = tools.propose_recipe({**twin, "title": "Chickpea Spinach Curry"}, plan["id"], "craft")["id"]
+    r = client.post(f"/api/recipe/{rid}/library", json={"keep": True})
+    assert r.status_code == 409
+    assert r.json()["detail"]["clash"]["title"].startswith("Chana") and "looks like" in r.json()["detail"]["message"]
+    assert client.post(f"/api/recipe/{rid}/library", json={"keep": True, "on_clash": "new"}).json()["in_library"]
