@@ -43,6 +43,19 @@ Fresh fish and greens get the earliest nights.
 stored with `in_library = 0`, so asking for new ideas ten times doesn't bury the
 recipes you cook. Crafted and imported recipes go straight in.
 
+**Meal-prep mode is a property of the plan, not of the recipes.** The same
+recipe can be an everyday dinner or a batch; the plan's `meal_prep` flag decides
+servings (`prep_servings`), which library recipes are offered (`MEAL_PREP_TAGS`),
+that everything cooks on one prep day back to back from `prep_start`, and that
+servings past `leftover_days` are frozen and still eaten rather than dropped.
+In a prep week, meals rotate between batches (most left first) — oldest-first
+would mean one dish for days. Costco is a nudge (`costco_suggested`), never
+required: what Costco does not sell falls through to the next store.
+
+**Costco is written out, not scaled.** QFC and PCC are scaled from Trader Joe's
+because they carry much the same range. Costco carries a narrow, bulky one, so
+it has its own offers for the packs worth buying and nothing else.
+
 **Prices are estimates until they're yours.** Offer `source` is `seed`, `scaled`,
 `claude` or `user`. Reseeding refreshes only `seed`/`scaled` rows that are still
 carried. A user price and a "not carried here" both survive it.

@@ -66,7 +66,7 @@ of Python, apart from ranking the library (see `suggest_from_library`).
 | `units.py` | Amounts → grams, and grams → words ("1½ cups", "2 cloves") |
 | `costing.py` | One recipe at N servings: cost of what is used, nutrition per serving |
 | `grocery.py` | All chosen recipes: summed, rounded to packages, routed to stores |
-| `schedule.py` | The week: day status, cook-night placement, servings walked through meals |
+| `schedule.py` | The week: day status, cook-night placement (or one prep session in meal-prep mode), servings walked through meals |
 | `calendars.py` | Private iCal feeds parsed (recurrences expanded); `.ics` written by hand |
 | `tools.py` | The tool layer |
 | `mcp/server.py` | The MCP server |
@@ -74,7 +74,9 @@ of Python, apart from ranking the library (see `suggest_from_library`).
 | `web/app.py` | FastAPI routes, loopback/tailnet-only middleware |
 | `web/network.py` | Which address to bind (shared with trainer) |
 | `web/static/` | `index.html`, manifest, service worker, icons |
-| `main.py` | CLI: `web`, `install-service`, `mcp`, `prices export/import` |
+| `main.py` | CLI: `web`, `doctor`, `install-service`, `restart`, `mcp`, `dedupe`, `prices export/import` |
+| `doctor.py` | The setup checks behind `sous-chef doctor` |
+| `install.sh` | One-command install and update (repo root) |
 | `tools/` | Developer scripts: icons, phone-layout check |
 
 ## The web UI

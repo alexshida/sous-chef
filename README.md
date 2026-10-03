@@ -20,6 +20,8 @@ the stores you've switched on and puts the cook times on your calendar.
 - **Leftovers are planned, not accidental.** Servings are walked through the week,
   covering dinner the night you cook and then lunches and non-cooking nights. Food
   that won't be eaten within four days is flagged to freeze.
+- **Meal-prep mode** cooks the week in one batch session with Costco's bulk packs.
+  See [below](#meal-prep-mode-and-costco).
 
 It's a sibling of [trainer](https://github.com/alexshida/trainer) and is built the same
 way: one Python package, SQLite on your Mac, a web app you add to your iPhone home
@@ -80,10 +82,33 @@ rather than duplicating them.
 Full two-way calendar sync needs Apple's native calendar framework (EventKit). That's
 the main reason for the planned native app (see Roadmap).
 
+## Meal-prep mode and Costco
+
+Flip **Meal-prep mode** on the Plan tab to cook the week in one session:
+
+- **Suggestions** switch to batch recipes made to keep and reheat. The library has
+  ten built from popular Costco meal preps: rotisserie-chicken burrito bowls and
+  pesto pasta, sheet-pan chicken thighs, turkey chili, teriyaki chicken, Korean beef,
+  coconut curry, Greek chicken bowls, pesto salmon and fried rice. ✨ ideas follow
+  the same brief.
+- **Servings** default to 8 per recipe. Change this in Settings → Meal prep.
+- **Everything is cooked on the first free day**, back to back from 1 pm (also
+  adjustable), longest recipe first. The calendar export makes those
+  *Meal prep: …* blocks.
+- **The freezer is part of the plan.** Servings that won't be eaten within four days
+  are marked to freeze on prep day and still count toward the week, and meals rotate
+  between batches instead of one dish for days.
+
+While the mode is on without Costco, the app suggests **Shop Costco first**. That
+puts Costco at the front of the week's stores; anything Costco doesn't sell comes
+from your other stores. With Costco on, the batch recipes cost about $2–6 a serving,
+about 30% less than buying the same food without it (estimated prices).
+
 ## Prices
 
 Trader Joe's and PCC publish no price data. The catalog starts from estimates: Trader
-Joe's priced product by product, QFC and PCC scaled from those by aisle. Every
+Joe's priced product by product, QFC and PCC scaled from those by aisle, Costco's bulk
+packs from 2025 warehouse prices. Every
 estimate is marked **est.** in the app. Correct the ones you buy on the Pantry tab and
 they become **yours**, and reseeding never overwrites them. If a store doesn't stock
 something, untick *carried* for that store. To update in bulk:
@@ -115,5 +140,5 @@ reasoning behind decisions and the traps.
   account (they need re-signing every 7 days), or a $99/yr developer account for
   TestFlight.
 - Calorie and macro tracking.
-- A weekend prep-ahead block (cook grains, marinate, chop) on the calendar.
+- Breakfast meal prep (egg bites, overnight oats). Plans cover lunches and dinners today.
 - Ratings, and favourites brought back into rotation.
