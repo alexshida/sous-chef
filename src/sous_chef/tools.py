@@ -70,6 +70,8 @@ def update_preferences(changes: dict) -> dict:
         schedule.parse_hhmm(merged.prep_start)
     except ValueError:
         raise ToolError("prep_start must look like 13:00")
+    if not 0 <= merged.batch_library <= 8 or not 0 <= merged.batch_claude <= 6:
+        raise ToolError("a fresh batch takes 0–8 library picks and 0–6 Claude ideas")
     try:
         schedule.parse_hhmm(merged.dinner_time)
     except ValueError:
@@ -680,8 +682,14 @@ def get_plan(plan_id: int | None = None) -> dict:
         if not r or r["id"] in chosen_ids:
             continue
         costed = cost_recipe(r, cat, servings=serve, stores=stores, pantry=pantry)
+        batch = bool(MEAL_PREP_TAGS & set(r["tags"]))
         candidates.append({
             **_summary(r, costed, prefs), "origin": c["origin"],
+            # Whether it suits the plan as it is now: buyable at its stores and,
+            # in meal-prep mode, a batch recipe. After a change of stores or mode
+            # the page offers a refresh, counting the ones that no longer fit.
+            "fits": not costed["unavailable"] and (batch or not plan["meal_prep"]),
+            "batch_friendly": batch,
             "adds_to_bill": grocery.marginal_cost((r, serve), pairs, cat,
                                                   stores=stores, pantry=pantry),
             "shares": grocery.shared_perishables(r, pairs, cat),
@@ -707,6 +715,7 @@ def get_plan(plan_id: int | None = None) -> dict:
         "targets": {"protein_g": prefs.protein_g, "fiber_g": prefs.fiber_g, "kcal": prefs.kcal},
         "household": prefs.household,
         "meal_prep": plan["meal_prep"], "default_servings": serve,
+        "misfit_suggestions": sum(not c["fits"] for c in candidates),
         # Bulk prep without the bulk store: worth a nudge, never a requirement.
         "costco_suggested": plan["meal_prep"] and "costco" not in stores,
     }
@@ -723,20 +732,21 @@ def _weighted_nutrition(selected: list[dict]) -> dict:
 def suggest_from_library(plan_id: int, count: int = 4, replace: bool = True) -> dict:
     """Offer library recipes as candidates — the instant, free kind of suggestion.
 
-    Picks recipes not already offered this week, buyable at the plan's stores,
-    weighted toward your cuisines, not cooked in the last two weeks, and — once
-    something is chosen — sharing its perishables. With `replace`, the current
-    unchosen candidates from the library are cleared first (a refresh).
+    Picks recipes buyable at the plan's stores, weighted toward your cuisines,
+    not cooked in the last two weeks, and — once something is chosen — sharing
+    its perishables. Recipes not yet offered this week come first; once those
+    run out, ones a refresh cleared come back (`library_exhausted` says so).
+    One rejected with ✕ never does. With `replace`, the library picks showing
+    now are cleared first.
     """
     plan = _plan_or_raise(plan_id)
     prefs = _prefs()
     cat, pantry, stores = _catalog(), db.pantry_ids(), plan["stores"]
-    seen = {c["recipe_id"] for c in db.candidates(plan["id"], include_dismissed=True)}
     chosen = {s["recipe_id"] for s in db.selections(plan["id"])}
     if replace:
-        for c in db.candidates(plan["id"]):
-            if c["origin"] == "library" and c["recipe_id"] not in chosen:
-                db.dismiss_candidate(plan["id"], c["recipe_id"])
+        db.clear_candidates(plan["id"], origins={"library"}, keep=chosen)
+    offered = {c["recipe_id"]: c["dismissed"]
+               for c in db.candidates(plan["id"], include_dismissed=True)}
     recent_from = (date.fromisoformat(plan["week_start"]) - timedelta(days=14)).isoformat()
     recent = db.recently_cooked(recent_from) - chosen
     pairs = _selected_pairs(plan, _recipes_by_id(chosen))
@@ -746,8 +756,8 @@ def suggest_from_library(plan_id: int, count: int = 4, replace: bool = True) -> 
 
     scored = []
     for r in db.list_recipes(library_only=True):
-        if r["id"] in seen or r["id"] in chosen:
-            continue
+        if r["id"] in chosen or offered.get(r["id"], db.CLEARED) != db.CLEARED:
+            continue                     # chosen, showing now, or rejected
         # Meal prep wants food that is made in bulk and keeps: recipes written
         # for it first, then anything that freezes or cooks in one pan or pot.
         if prep and not MEAL_PREP_TAGS & set(r["tags"]):
@@ -770,14 +780,30 @@ def suggest_from_library(plan_id: int, count: int = 4, replace: bool = True) -> 
             score += 4.0 if "meal-prep" in r["tags"] else 0
         elif r["total_min"] > prefs.max_weeknight_min:
             score -= 0.5
-        scored.append((score, r["id"]))
-    scored.sort(reverse=True)
-    picked = _diverse([rid for _, rid in scored], count)
+        scored.append((r["id"] in offered, -score, r["id"]))
+    scored.sort()                        # never offered first, then best score
+    picked = _diverse([rid for _, _, rid in scored], count)
     for rid in picked:
         db.add_candidate(plan["id"], rid, "library")
     out = get_plan(plan["id"])
-    out["library_exhausted"] = len(picked) < count
+    out["library_exhausted"] = len(picked) < count or any(rid in offered for rid in picked)
     return out
+
+
+def fresh_suggestions(plan_id: int, library: int | None = None) -> dict:
+    """Start the week's suggestions over: clear every unchosen one — from the
+    library and from Claude alike — and put fresh library picks in their place.
+
+    The page then asks Claude for its share (`batch_claude`), which streams in
+    alongside. Recipes already chosen for the week are untouched.
+    """
+    plan = _plan_or_raise(plan_id)
+    chosen = {s["recipe_id"] for s in db.selections(plan["id"])}
+    db.clear_candidates(plan["id"], keep=chosen)
+    count = _prefs().batch_library if library is None else int(library)
+    if count <= 0:
+        return get_plan(plan["id"])
+    return suggest_from_library(plan["id"], count, replace=False)
 
 
 def _diverse(ranked: list[int], count: int) -> list[int]:

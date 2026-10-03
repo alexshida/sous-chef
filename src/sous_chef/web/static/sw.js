@@ -11,7 +11,7 @@
 // Bump this whenever the shell changes. The fetch handler is cache-first, so
 // without a new name a refresh serves the old index.html and only the *next*
 // open gets the revalidated one — a UI fix appears to not have shipped.
-const VERSION = 'sous-chef-v4';
+const VERSION = 'sous-chef-v5';
 const SHELL = [
   '/',
   '/static/manifest.json',

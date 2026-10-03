@@ -362,3 +362,62 @@ def test_an_existing_database_gains_the_meal_prep_column(fresh_db):
         conn.execute("ALTER TABLE plans DROP COLUMN meal_prep")
     db.init_db()
     assert tools.new_plan(meal_prep=True)["meal_prep"]
+
+
+# ── fresh batches ────────────────────────────────────────────
+
+def test_a_fresh_batch_clears_everything_unchosen_and_refills(plan):
+    p = tools.suggest_from_library(plan["id"], 3)
+    keep = p["candidates"][0]["id"]
+    tools.select_recipe(plan["id"], keep)
+    claude = tools.propose_recipe(GOOD, plan["id"])["id"]          # a Claude idea showing too
+    before = {c["id"] for c in tools.get_plan(plan["id"])["candidates"]}
+    assert claude in before
+
+    fresh = tools.fresh_suggestions(plan["id"], library=3)
+    now = {c["id"] for c in fresh["candidates"]}
+    assert len(now) == 3 and now.isdisjoint(before)
+    assert [s["id"] for s in fresh["selected"]] == [keep]           # the chosen one stays
+
+
+def test_a_fresh_batch_with_no_library_share_just_clears(plan):
+    tools.suggest_from_library(plan["id"], 3)
+    assert tools.fresh_suggestions(plan["id"], library=0)["candidates"] == []
+
+
+def test_rejected_recipes_never_return_but_cleared_ones_can(plan):
+    first = tools.suggest_from_library(plan["id"], 1)["candidates"][0]["id"]
+    tools.dismiss_candidate(plan["id"], first)                      # ✕: not this week
+    seen_cleared = set()
+    for _ in range(12):                                             # cycle the whole library
+        p = tools.fresh_suggestions(plan["id"], library=4)
+        ids = {c["id"] for c in p["candidates"]}
+        assert first not in ids
+        seen_cleared |= ids
+    assert p["library_exhausted"]                                   # it had to reuse some
+    assert len(p["candidates"]) == 4                                # …but never came up short
+
+
+def test_suggestions_that_no_longer_fit_are_counted(plan):
+    tools.update_plan(plan["id"], stores=["tj", "qfc"])
+    paneer = next(r for r in db.list_recipes() if r["title"].startswith("Palak Paneer"))
+    db.add_candidate(plan["id"], paneer["id"], "library")
+    assert tools.get_plan(plan["id"])["misfit_suggestions"] == 0
+    p = tools.update_plan(plan["id"], stores=["tj"])                # paneer is not at Trader Joe's
+    assert p["misfit_suggestions"] == 1
+    assert next(c for c in p["candidates"] if c["id"] == paneer["id"])["fits"] is False
+
+
+def test_switching_to_meal_prep_counts_everyday_recipes_as_misfits(plan):
+    p = tools.suggest_from_library(plan["id"], 4)
+    everyday = [c for c in p["candidates"] if not c["batch_friendly"]]
+    p = tools.update_plan(plan["id"], meal_prep=True)
+    assert p["misfit_suggestions"] == len(everyday)
+
+
+def test_batch_sizes_are_validated(fresh_db):
+    with pytest.raises(tools.ToolError):
+        tools.update_preferences({"batch_library": 20})
+    with pytest.raises(tools.ToolError):
+        tools.update_preferences({"batch_claude": -1})
+    assert tools.update_preferences({"batch_library": 2, "batch_claude": 4})["batch_claude"] == 4

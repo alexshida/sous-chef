@@ -305,7 +305,7 @@ const STATUS_LABEL = {home:'Free', busy:'Busy', out:'Out', away:'Away'};
 const STATUS_CYCLE = [null, 'home', 'busy', 'out', 'away'];
 const ORIGIN = {library:'', claude:'✨ Claude', craft:'✨ Crafted', import:'Imported'};
 
-const S = {plan:null, prefs:null, tab:'plan', grocery:null, recipes:null, catalog:null,
+const S = {plan:null, prefs:null, tab:'plan', refreshNudge:null, grocery:null, recipes:null, catalog:null,
            chef:{busy:false, lines:[], saved:new Set()}, open:{}, sheet:null, cuisine:''};
 
 // ── plumbing ───────────────────────────────────────────────
@@ -425,6 +425,11 @@ function renderWeek(p){
     </div>
     ${p.costco_suggested ? `<div class="nudge"><span>🛒 Bulk prep goes further with Costco's family packs — chicken by the 6 lb, beans by the 8-pack.</span>
       <button class="primary small" data-action="add-costco">Shop Costco first</button></div>` : ''}
+    ${S.refreshNudge && p.candidates.length ? `<div class="nudge"><span>${esc(S.refreshNudge)} — ${p.misfit_suggestions
+        ? `${p.misfit_suggestions} suggestion${p.misfit_suggestions === 1 ? ' no longer fits' : 's no longer fit'}. Refresh them?`
+        : 'refresh the suggestions to match?'}</span>
+      <button class="primary small" data-action="fresh" ${S.chef.busy ? 'disabled' : ''}>↻ Fresh batch</button>
+      <button class="ghost small" data-action="keep-suggestions">Keep these</button></div>` : ''}
     <div class="days">${days}</div>
     <div class="legend">Tap a day to mark it free, busy, out for dinner or away${w.calendar_connected ? ' (• = changed from your calendar)' : ' — or connect your calendar in Settings'}.</div>
     ${w.calendar_problems.map(x => `<div class="err small">${esc(x)}</div>`).join('')}
@@ -471,6 +476,7 @@ function recipeTags(r, extra = [], {cuisine = true} = {}){
   const t = r.targets || {}, tags = [...extra];
   if(cuisine) tags.push(`<span class="pill">${esc(r.cuisine_name)}</span>`);
   if(ORIGIN[r.origin]) tags.push(`<span class="pill accent">${ORIGIN[r.origin]}</span>`);
+  if(r.batch_friendly === false && S.plan?.meal_prep) tags.push(`<span class="pill warn">not a batch recipe</span>`);
   if(t.protein === false) tags.push(`<span class="pill warn">${g(t.protein_gap)} g short on protein</span>`);
   if(t.fiber === false) tags.push(`<span class="pill warn">low fiber</span>`);
   if(r.unavailable && r.unavailable.length) tags.push(`<span class="pill bad list">not at your stores: ${esc(few(r.unavailable.map(short)).toLowerCase())}</span>`);
@@ -531,13 +537,42 @@ function renderCands(p){
     ${list}
     <div id="chef-anchor" style="margin-top:.8rem">${chefPanel}</div>
     <div class="row">
-      <button data-action="library" ${S.chef.busy ? 'disabled' : ''}>↻ Different picks</button>
-      <button class="primary" data-action="ask" ${S.chef.busy ? 'disabled' : ''}>✨ New ideas from Claude</button>
+      <button class="primary" data-action="fresh" ${S.chef.busy ? 'disabled' : ''}>↻ Fresh batch</button>
+      <span class="small muted" style="flex:1 1 10rem">${freshCaption()}</span>
+    </div>
+    <div class="row" style="margin-top:.35rem">
+      <button class="ghost small" data-action="library" ${S.chef.busy ? 'disabled' : ''}>+ Library picks</button>
+      ${S.prefs?.claude_available ? `<button class="ghost small" data-action="ask" ${S.chef.busy ? 'disabled' : ''}>+ ✨ Claude ideas</button>` : ''}
     </div>
     <div class="craft"><input id="craft-in" placeholder="Something with miso and salmon…" aria-label="Describe a recipe" ${S.chef.busy ? 'disabled' : ''}>
       <button data-action="craft" ${S.chef.busy ? 'disabled' : ''}>Craft</button></div>
     <div class="row" style="margin-top:.5rem"><button class="ghost small" data-action="import-open">Import your own recipe…</button>
       <span class="spacer"></span><button class="ghost small" data-action="new-week">Start next week's plan</button></div>`;
+}
+
+// A fresh batch: clear the unchosen suggestions, refill from the library at
+// once, then stream Claude's share in. The split comes from Settings.
+function batchSplit(){
+  const L = S.prefs?.batch_library ?? 3;
+  const C = S.prefs?.claude_available ? (S.prefs?.batch_claude ?? 3) : 0;
+  return {L, C};
+}
+function freshCaption(){
+  const {L, C} = batchSplit();
+  const parts = [];
+  if(L) parts.push(`${L} from your library`);
+  if(C) parts.push(`${C} new from Claude`);
+  let text = parts.join(' + ') || 'clears the list';
+  if(!S.prefs?.claude_available) text += ' · set up Claude for ✨ ideas (see docs/INSTALL.md)';
+  return 'Replaces the suggestions: ' + text;
+}
+async function freshBatch(){
+  const {L, C} = batchSplit();
+  S.refreshNudge = null;
+  const plan = await api('POST', `/api/plan/${S.plan.id}/fresh`, {library: L});
+  setPlan(plan);
+  if(C > 0) return runChef({task: 'suggest', count: C});
+  if(plan.library_exhausted) toast('Your library is running low on fresh picks — ✨ Claude can add new ones');
 }
 
 // ── chef ───────────────────────────────────────────────────
@@ -875,6 +910,12 @@ function renderSettings(){
       <label class="switch" style="color:var(--ink);font-size:.95rem"><input type="checkbox" name="store:${s}" ${p.stores.includes(s) ? 'checked' : ''}> ${esc(p.store_names[s])}</label>
       <span class="spacer"></span>
       <button type="button" class="ghost" data-action="store-up" data-store="${s}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button></div>`).join('')}</div>
+    <h2 style="margin-top:1.1rem">Suggestions</h2>
+    <p class="small muted" style="margin-top:0">What ↻ Fresh batch brings in.</p>
+    <div class="grid2">
+      <label class="field">From your library<input type="number" min="0" max="8" name="batch_library" value="${p.batch_library}"></label>
+      <label class="field">New from Claude<input type="number" min="0" max="6" name="batch_claude" value="${p.batch_claude}"></label>
+    </div>
     <h2 style="margin-top:1.1rem">Meal prep</h2>
     <div class="grid2">
       <label class="field">Servings per batch recipe<input type="number" min="1" max="24" name="prep_servings" value="${p.prep_servings}"></label>
@@ -902,6 +943,7 @@ async function saveSettings(ev){
     lunches: +f.get('lunches'), dinner_time: f.get('dinner_time'), max_weeknight_min: +f.get('max_weeknight_min'),
     leftover_days: +f.get('leftover_days'), protein_g: +f.get('protein_g'), fiber_g: +f.get('fiber_g'), kcal: +f.get('kcal'),
     prep_servings: +f.get('prep_servings'), prep_start: f.get('prep_start'),
+    batch_library: +f.get('batch_library'), batch_claude: +f.get('batch_claude'),
     cuisines: Object.fromEntries(Object.keys(p.cuisine_names).filter(k => k !== 'other').map(k => [k, +f.get('cuisine:' + k)])),
     stores: order.filter(s => f.get('store:' + s)),
     avoid: String(f.get('avoid')).split(',').map(s => s.trim()).filter(Boolean),
@@ -928,10 +970,12 @@ async function act(a, el){
         let stores = p.stores.includes(s) ? p.stores.filter(x => x !== s) : [...p.stores, s];
         if(!stores.length) return toast('Keep at least one store');
         stores = [...new Set(order)].filter(x => stores.includes(x));
+        S.refreshNudge = 'Stores changed to ' + stores.map(x => p.store_names[x]).join(' + ');
         return setPlan(await api('PATCH', `/api/plan/${p.id}`, {stores}));
       }
       case 'add-costco': {
         const stores = ['costco', ...p.stores.filter(s => s !== 'costco')];
+        S.refreshNudge = 'Costco is first now';
         setPlan(await api('PATCH', `/api/plan/${p.id}`, {stores}));
         return toast('Costco first — anything it doesn’t carry comes from your other stores');
       }
@@ -963,13 +1007,15 @@ async function act(a, el){
       }
       case 'keep': await api('POST', `/api/recipe/${id}/library`, {keep: true}); toast('Saved to your library'); return openRecipe(id, S.sheet?.servings);
       case 'close': return closeSheet();
+      case 'fresh': return freshBatch();
+      case 'keep-suggestions': S.refreshNudge = null; return renderPlan();
       case 'library': {
-        const plan = await api('POST', `/api/plan/${p.id}/library`, {count: 4, replace: true});
+        const plan = await api('POST', `/api/plan/${p.id}/library`, {count: batchSplit().L || 3, replace: false});
         setPlan(plan);
-        if(plan.library_exhausted) toast('That is everything in your library that fits — try ✨ New ideas from Claude');
+        if(plan.library_exhausted) toast('Some of these were offered before — ✨ Claude can add new ones');
         return;
       }
-      case 'ask': return runChef({task: 'suggest', count: 3});
+      case 'ask': return runChef({task: 'suggest', count: batchSplit().C || 3});
       case 'craft': {
         const text = $('#craft-in').value.trim();
         if(!text) return $('#craft-in').focus();
@@ -1026,10 +1072,9 @@ document.addEventListener('change', async ev => {
   const el = ev.target, a = el.dataset.action;
   try{
     if(a === 'mealprep'){
-      await api('PATCH', `/api/plan/${S.plan.id}`, {meal_prep: el.checked});
-      // Fresh picks for the mode: batch recipes on, everyday ones off.
-      setPlan(await api('POST', `/api/plan/${S.plan.id}/library`, {count: 4, replace: true}));
-      toast(el.checked ? 'Meal-prep mode on — suggestions are batch recipes now' : 'Meal-prep mode off');
+      // Offer a refresh rather than swapping the list behind your back.
+      S.refreshNudge = el.checked ? 'Switched to meal-prep mode' : 'Meal-prep mode off';
+      setPlan(await api('PATCH', `/api/plan/${S.plan.id}`, {meal_prep: el.checked}));
     }
     if(a === 'cookday') setPlan(await api('POST', `/api/plan/${S.plan.id}/cook-date`, {recipe_id: +el.dataset.id, cook_date: el.value || null}));
     if(a === 'check'){

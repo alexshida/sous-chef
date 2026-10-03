@@ -53,15 +53,27 @@ def _call(fn, *args, **kwargs) -> Any:
 
 # ── preferences ──────────────────────────────────────────────
 
+def _with_environment(prefs: dict) -> dict:
+    """Preferences plus what this machine can do, so the page can say whether
+    Claude's ✨ ideas are available before anyone taps for them."""
+    try:
+        chef.claude_cli_path()
+        prefs["claude_available"] = True
+    except chef.ChefError:
+        prefs["claude_available"] = False
+    return prefs
+
+
 @app.get("/api/prefs")
 def api_prefs():
-    return _call(tools.get_preferences)
+    return _with_environment(_call(tools.get_preferences))
 
 
 @app.put("/api/prefs")
 def api_update_prefs(changes: dict):
-    changes = {k: v for k, v in changes.items() if k not in ("store_names", "cuisine_names")}
-    return _call(tools.update_preferences, changes)
+    changes = {k: v for k, v in changes.items()
+               if k not in ("store_names", "cuisine_names", "claude_available")}
+    return _with_environment(_call(tools.update_preferences, changes))
 
 
 # ── plans ────────────────────────────────────────────────────
@@ -88,7 +100,8 @@ def api_current_plan():
 def api_new_plan(req: NewPlan):
     plan = _call(tools.new_plan, req.week_start, req.n_recipes, req.stores)
     if req.suggest:
-        plan = _call(tools.suggest_from_library, plan["id"], max(3, plan["n_recipes"] + 1))
+        count = max(tools.get_preferences()["batch_library"], plan["n_recipes"] + 1)
+        plan = _call(tools.suggest_from_library, plan["id"], count)
     return plan
 
 
@@ -118,6 +131,17 @@ class Suggest(BaseModel):
 @app.post("/api/plan/{plan_id}/library")
 def api_library_suggestions(plan_id: int, req: Suggest):
     return _call(tools.suggest_from_library, plan_id, req.count, req.replace)
+
+
+class Fresh(BaseModel):
+    library: int | None = None
+
+
+@app.post("/api/plan/{plan_id}/fresh")
+def api_fresh(plan_id: int, req: Fresh):
+    """Clear the week's unchosen suggestions and refill them from the library;
+    the page follows up with a chef run for Claude's share."""
+    return _call(tools.fresh_suggestions, plan_id, req.library)
 
 
 class RecipeRef(BaseModel):

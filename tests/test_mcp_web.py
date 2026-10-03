@@ -219,3 +219,21 @@ def test_a_second_chef_request_attaches_and_replays(client, monkeypatch):
     monkeypatch.setattr(chef, "current_job", lambda *a, **k: job)
     r = client.get("/api/chef/stream?plan_id=1&recent=true")
     assert "Dal" in r.text
+
+
+def test_fresh_batch_through_the_api(client):
+    plan = client.post("/api/plan", json={}).json()
+    old = {c["id"] for c in plan["candidates"]}
+    p = client.post(f"/api/plan/{plan['id']}/fresh", json={"library": 2}).json()
+    assert len(p["candidates"]) == 2 and old.isdisjoint({c["id"] for c in p["candidates"]})
+
+
+def test_prefs_say_whether_claude_is_available(client, monkeypatch):
+    assert client.get("/api/prefs").json()["claude_available"] in (True, False)
+    def missing():
+        raise chef.ChefError("no")
+    monkeypatch.setattr(chef, "claude_cli_path", missing)
+    prefs = client.get("/api/prefs").json()
+    assert prefs["claude_available"] is False
+    prefs["batch_claude"] = 2
+    assert client.put("/api/prefs", json=prefs).json()["batch_claude"] == 2

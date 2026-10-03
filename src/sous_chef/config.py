@@ -56,6 +56,8 @@ class Preferences:
     leftover_days: int = 4                # how long cooked food keeps in the fridge
     prep_servings: int = 8                # meal-prep mode: servings per batch recipe
     prep_start: str = "13:00"             # meal-prep mode: when the prep session starts
+    batch_library: int = 3                # a fresh batch: picks from your library…
+    batch_claude: int = 3                 # …and new ideas from Claude
     calendar_feeds: list[str] = field(default_factory=list)
     timezone: str = "America/Los_Angeles"
     notes: str = ""                       # anything else the chef should know

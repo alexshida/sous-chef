@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS plans (
     created_at TEXT
 );
 
+-- dismissed: 0 showing, 1 rejected with ✕ (never offered again that week),
+-- 2 cleared by a refresh (may come back once unseen recipes run out).
 CREATE TABLE IF NOT EXISTS plan_candidates (
     plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
@@ -436,10 +438,29 @@ def candidates(pid: int, *, include_dismissed: bool = False) -> list[dict]:
         return [dict(r) for r in conn.execute(sql + " ORDER BY added_at, recipe_id", (pid,))]
 
 
+SHOWING, REJECTED, CLEARED = 0, 1, 2
+
+
 def dismiss_candidate(pid: int, rid: int) -> None:
+    """The ✕ on a suggestion: not this one, not this week."""
     with get_conn() as conn:
-        conn.execute("UPDATE plan_candidates SET dismissed = 1 WHERE plan_id = ? AND recipe_id = ?",
-                     (pid, rid))
+        conn.execute("UPDATE plan_candidates SET dismissed = ? WHERE plan_id = ? AND recipe_id = ?",
+                     (REJECTED, pid, rid))
+
+
+def clear_candidates(pid: int, *, origins: set[str] | None = None,
+                     keep: set[int] = frozenset()) -> int:
+    """Take the plan's showing suggestions off the list without rejecting them."""
+    sql = "UPDATE plan_candidates SET dismissed = ? WHERE plan_id = ? AND dismissed = ?"
+    args: list = [CLEARED, pid, SHOWING]
+    if origins:
+        sql += f" AND origin IN ({','.join('?' * len(origins))})"
+        args += sorted(origins)
+    if keep:
+        sql += f" AND recipe_id NOT IN ({','.join('?' * len(keep))})"
+        args += sorted(keep)
+    with get_conn() as conn:
+        return conn.execute(sql, args).rowcount
 
 
 def selections(pid: int) -> list[dict]:
